@@ -10,10 +10,18 @@ Data as of **2026-09-27**: 52 FOMC meetings, 660 contracts, about 98,000 daily p
 |---|---|
 | `kalshi_fed_funds.ipynb` | The full pipeline: download, compute, charts, scorecard. Run top to bottom. |
 | `fetch_kalshi_fed.py`, `build_series.py` | The same pipeline as scripts, plus they rebuild `fed_curve.html`. |
-| `fed_curve.html` | Interactive version of the charts (self-contained page). |
+| `fed_curve.html` | Interactive version of the charts (self-contained page), including a method-and-validation section with the replication, the ablation and the survey benchmark. |
 | `data/implied_rate_daily.csv` | **Main output.** One row per meeting per day: implied upper bound, implied EFFR, outcome distribution, reliability flag. |
 | `data/constant_horizon.csv` | One row per day: implied rate (upper bound and EFFR basis) for the next, 3rd and 6th upcoming meeting, the target in force, and actual EFFR. |
 | `data/fred_effr.csv` | Daily EFFR and target upper bound from FRED. |
+| `data/trades.csv.gz` | Every trade on every contract, 2021–2026 (about 222,000 trades). |
+| `data/implied_rate_daily_dkw.csv` | Daily implied rates rebuilt with the Diercks–Katz–Wright method, from the trade data. |
+| `data/method_comparison.csv` | Our method vs theirs, scored against realized decisions. |
+| `data/nyfed_sme.csv` | NY Fed dealer survey: median modal forecast for each upcoming meeting, 36 surveys. |
+| `data/survey_comparison.csv` | Survey vs Kalshi forecasts on each survey's due date. |
+| `data/ablation.csv` | The 2×2 ablation: each pricing rule paired with each monotonicity rule. |
+| `data/validation.json` | Replication and benchmark results, read by `build_series.py` for the website. |
+| `data/track_record.csv` | Probability the market put on the actual decision 1 day, 1 week and 1 month before each settled meeting. |
 | `data/candles_daily.csv` | Raw daily bid, ask, last trade, volume and open interest for every contract. |
 | `data/markets.csv` | One row per contract with strike and settlement result. |
 | `data/meeting_summary.csv` | Scorecard: implied rate the day before each meeting vs the decision. |
@@ -99,6 +107,16 @@ On the last day before each of the 41 settled meetings:
 
 The biggest miss was **September 2024**, the first cut of the cycle. The day before, the market put 54% on a 50bp cut and 43% on 25bp, for an implied 5.10%. The Fed cut 50bp, to 5.00%. The meeting explorer in the notebook shows the market swinging between the two outcomes through August and September. The next-largest miss was July 2026 (+6.6bp): the market gave a 25bp hike a 25% chance, and the Fed held at 3.75%.
 
+Probability the market put on the decision the Fed actually made:
+
+| When | Median | Meetings at ≥90% | Meetings below 50% |
+|---|---|---|---|
+| 1 day before | 97% | 85% | 0 of 41 |
+| 1 week before | 95% | 68% | 2 of 41 |
+| 1 month before | 81% | 27% | 5 of 39 |
+
+The two meetings below 50% a week out are the two genuine surprises of the period. **June 2022 (75bp hike):** 5% a week before, 80% the day before, after press reports in the final days. **September 2024 (50bp cut):** 5% a week before, 54% the day before. The odds-by-meeting chart shows any meeting's odds 1 month, 1 week and 1 day out, with the actual decision marked.
+
 Looking backward from each meeting, the implied rate typically settles within 5bp of the eventual decision about **27 days** before the meeting (interquartile range 17–48 days). In other words, the outcome is usually priced in by the time of the previous month's data releases.
 
 ### Longer horizons are less accurate, and biased in a consistent direction
@@ -111,7 +129,7 @@ Error of the implied rate against the eventual decision, averaged over all relia
 | 3rd meeting (~4 months) | 1,396 | 22.5bp | −10.6bp |
 | 6th meeting (~9 months) | 432 | 34.5bp | −15.9bp |
 
-A negative error means the market expected a lower rate than what happened. The bias follows the cycle:
+A negative error means the market expected a lower rate than what happened. The forecast-error histograms in the notebook and website show the full distributions. Next-meeting errors are tightly bunched around zero. The 3rd- and 6th-meeting errors spread over roughly ±60bp and are shifted left, with a long left tail from 2022. The bias follows the cycle:
 
 - **2022 (hiking cycle):** the market consistently underpriced how far the Fed would go. The 3rd-meeting forecast averaged 38bp too low, and the 6th-meeting forecast 55bp too low. The ladder also ran out of strikes during this period, so many days are flagged unreliable.
 - **2023 (hold at 5.25–5.50%):** 3rd-meeting forecasts were nearly unbiased (−3bp). 6th-meeting forecasts were 38bp too low, because the market kept pricing cuts that didn't come.
@@ -129,10 +147,52 @@ The hair chart makes the same point visually:
 - **2024–2025:** hairs mostly lie on top of the cutting path.
 - **2026:** hairs point down toward about 3% in 2027 while the Fed hiked to 4.00%. Only the most recent paths turn up.
 
+## Replication of Diercks, Katz & Wright (2026)
+
+Diercks, Katz and Wright, *Kalshi and the Rise of Macro Markets* (NBER Working Paper 34702; Federal Reserve FEDS 2026-010), build daily fed funds distributions from the same Kalshi ladders. Their method differs from ours in two places: they price each contract at its **last trade** (carried forward), where we use the bid/ask midpoint with fallbacks; and they enforce monotonicity **outward from the mode**, where we use a weighted isotonic fit. Notebook section 13 rebuilds their method from the trade-level data (last trade of each ET day) and scores both methods on the same meeting-days: 5,934 days between 1 and 160 days before each of the 41 settled meetings.
+
+| | Their method | Ours |
+|---|---|---|
+| Mode right, 1 day before | **41 of 41** | **41 of 41** |
+| Mean absolute error of the mean, 1 day before | 1.6bp | 1.2bp |
+| … 1 week before | 3.0bp | 2.7bp |
+| … 1 month before | 5.9bp | 5.9bp |
+| … 3 months before | 21.9bp | 19.3bp |
+| … averaged over 1–160 days | 20.8bp | 17.9bp |
+| Mode, averaged over 1–160 days | 21.0bp | 16.1bp |
+| Average day-to-day change in the implied rate | 1.6bp | 1.3bp |
+
+- **The replication succeeds.** Their headline result, a perfect day-before record for the mode, holds under their method on our data, including on their 2022–2025 window, and also for 2021 and 2026, which their paper doesn't cover.
+- **Inside a month they are about equal.** From roughly 45 to 20 days out their mode is slightly more accurate than ours (about 1bp).
+- **Beyond a month ours is more accurate and less noisy**, by 3–5bp on average and by up to 25bp at 120–160 days. That's where the difference between the methods matters: the median last trade behind their prices is 3–6 days old, and on thinly traded strikes much older.
+- **Which choice matters (2×2 ablation).** Pairing each pricing rule with each monotonicity rule shows the gain comes from pricing. With their mode-outward rule, switching from last trades to quotes cuts the 1–160 day error from 20.8 to 18.0bp; with quotes, the monotonicity rule barely matters (18.0 vs 17.9bp). With last trades, their mode-outward rule is the better one near the meeting (1.6 vs 2.8bp the day before). About 40–45% of last-trade prices are more than a week old at every horizon. Our quotes + isotonic cell reproduces the main series exactly.
+- **Selection check.** Restricting both methods to the days our reliability flag passes lowers both errors but keeps the gap (17.0bp vs 14.0bp), so our advantage doesn't come from the filter.
+
+The time of day for the last trade isn't specified in their paper; we assume end of ET day. The gaps have not been tested for statistical significance.
+
+## Benchmark: NY Fed Survey of Market Expectations
+
+Before each FOMC meeting the New York Fed surveys primary dealers on their most likely target rate after each upcoming meeting. Notebook section 14 downloads 36 dealer surveys from March 2021 to July 2026: the spreadsheets from July 2023, and the text PDFs before that. The November 2022 to June 2023 results are image-only PDFs and can't be read, and three 2021 PDFs use a different layout, so those surveys are missing. Each survey forecast is compared with Kalshi on the survey's due date. The sample is limited to meetings whose ladder is reliably priced that day, which leaves 132 forecasts from 33 surveys covering 37 meetings.
+
+Mean absolute error against the realized upper bound (bp):
+
+| Horizon | Forecasts | Dealer survey | Kalshi mode (ours) | Kalshi mean (ours) | Kalshi mean (DKW) |
+|---|---|---|---|---|---|
+| ≤ 45 days | 33 | 1.5 | 1.5 | 2.5 | 2.9 |
+| 46–90 days | 30 | 8.3 | 6.7 | 10.6 | 11.0 |
+| 91–180 days | 43 | 23.3 | 21.5 | 26.8 | 29.8 |
+| > 180 days | 26 | 47.1 | 41.3 | 49.6 | 58.0 |
+| All | 132 | 19.1 | **17.0** | 21.5 | 24.4 |
+
+- **Kalshi's mode matches or beats the dealer survey at every horizon.** The survey is a modal forecast, so the mode is the like-for-like comparison. It was exactly right 59% of the time, against 57% for the survey.
+- **Kalshi's mean does worse than the survey.** The mean spreads probability over outcomes that don't happen, which costs accuracy against a single realized value.
+- This is consistent with Diercks–Katz–Wright's finding that Kalshi is comparable to or better than surveys, here on a longer sample. With 132 overlapping forecasts the differences are suggestive, not statistically established.
+
 ### Where things stand (2026-09-27)
 
 - Target upper bound: **4.00%**, set on Sep 16, 2026 after a 25bp hike.
 - Actual EFFR: 3.88% (Sep 25), about 12bp below the upper bound.
+- The odds for Oct 28 moved a lot in a month. On Aug 28, before the September hike, the market put 41% on 3.75%, 51% on 4.00% and 5% on 4.25% or higher. Now it's 35% on 4.00% and 64% on 4.25% or higher.
 - **Oct 28, 2026:** implied 4.16% upper bound, 4.04% on an EFFR basis, with about a 64% chance of another hike, 35% hold and 1% cut.
 - **Dec 9, 2026:** implied 4.35% upper bound, 4.23% EFFR.
 - Jan 2027 onward: ladders are too thinly quoted to price reliably today. The Jun 2027 through Jan 2028 meetings were only listed on Sep 18, 2026.

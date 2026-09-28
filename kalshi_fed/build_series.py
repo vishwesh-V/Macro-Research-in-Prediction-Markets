@@ -9,8 +9,12 @@ Outputs:
                               flagged reliable are used
   data/fred_effr.csv          EFFR and target upper bound from FRED (cached)
   data/implied_rate_daily.csv adds effr_spread and implied_effr columns
+  data/track_record.csv       probability on the actual decision 1 day, 1 week
+                              and 1 month before each settled meeting
   data/chart_data.json        compact payload for the HTML chart
-  fed_curve.html              interactive chart (template + payload)
+  fed_curve.html              interactive chart (template + payload); includes the
+                              validation section when the notebook has written
+                              data/validation.json
 """
 import argparse
 import io
@@ -97,6 +101,13 @@ for d in sorted(r.date.unique()):
     rows.append(row)
 ch = pd.DataFrame(rows)
 
+# Forecast errors by horizon: implied minus the eventual decision, in bp.
+rmap = dict(zip(realized.meeting_date, realized.upper_bound))
+errors = {}
+for name in ("next", "third", "sixth"):
+    e = ((ch[f"{name}_implied"] - ch[f"{name}_meeting"].map(rmap)) * 100).dropna()
+    errors[name] = [round(float(v), 1) for v in e]
+
 # Hair chart: on the first trading day of each month, the implied path through
 # every upcoming meeting that's reliably priced, starting from the target in force.
 hairs = []
@@ -126,6 +137,26 @@ def on_grid(d):
     return out
 
 
+# Track record: probability the market put on the decision the Fed actually
+# made, 1 day, 1 week and 1 month before each settled meeting.
+track = []
+for _, mt in realized.iterrows():
+    g = r[r.event_ticker == mt.event_ticker].sort_values("date")
+    rec = {"event_ticker": mt.event_ticker, "meeting_date": mt.meeting_date, "realized": mt.upper_bound}
+    for lag, name in ((1, "1d"), (7, "1w"), (30, "1m")):
+        cut = (pd.Timestamp(mt.meeting_date) - pd.Timedelta(days=lag)).strftime("%Y-%m-%d")
+        row = g[g.date <= cut].tail(1)
+        if len(row):
+            gd = on_grid(json.loads(row.distribution.iloc[0]))
+            k0 = min(gd)
+            rec[f"p_{name}"] = round(gd.get(mt.upper_bound, 0) if mt.upper_bound > k0
+                                     else sum(v for k, v in gd.items() if k <= k0), 4)
+            rec[f"date_{name}"] = row.date.iloc[0]
+            rec[f"reliable_{name}"] = bool(row.reliable.iloc[0])
+    track.append(rec)
+track = pd.DataFrame(track)
+track.to_csv(D / "track_record.csv", index=False)
+
 # Chart payload.
 meet = {}
 for ev, g in r.sort_values("date").groupby("event_ticker"):
@@ -152,10 +183,15 @@ payload = {
     "realized": real.astype(object).where(real.notna(), None).to_dict("records"),
     "hairs": hairs,
     "effr_gap": round(float(gap.get(r.date.max())), 4),
+    "errors": errors,
+    "track": track.astype(object).where(track.notna(), None).to_dict("records"),
     "horizon": {c: ch[c].astype(object).where(ch[c].notna(), None).tolist() for c in
                 ["date", "current_target", "next_implied", "third_implied", "sixth_implied",
                  "next_meeting", "third_meeting", "sixth_meeting"]},
 }
+# Replication and benchmark results, written by the notebook (sections 13–14).
+if (D / "validation.json").exists():
+    payload["validation"] = json.loads((D / "validation.json").read_text())
 (D / "chart_data.json").write_text(json.dumps(payload, separators=(",", ":")))
 
 # Self-contained chart page.

@@ -84,7 +84,22 @@ td.move-up{color:var(--hike)} td.move-dn{color:var(--cut)}
 .methods h3{font:600 15px var(--cond);color:var(--ink);margin:0 0 4px}
 .methods p{margin:0}
 code{font:12.5px var(--mono);background:var(--grid);padding:1px 5px;border-radius:4px;color:var(--ink)}
-@media (max-width:560px){.strip>div+div{border-left:0;padding-left:0;border-top:1px solid var(--rule)} section.card{padding:14px}}
+.part{display:flex;flex-direction:column;gap:6px;padding-top:12px;border-top:1px solid var(--rule)}
+.part h2{font-size:26px}
+.why{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.why>div{display:flex;flex-direction:column;gap:6px;padding:14px 16px;border:1px solid var(--rule);border-radius:8px}
+.why h3{font:600 15px var(--cond);margin:0}
+.why p{margin:0;font-size:14px;color:var(--ink-2)}
+.why .fig{font:500 22px var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+.stats>div{padding:12px 16px 12px 0;display:flex;flex-direction:column;gap:3px}
+.stats>div+div{padding-left:16px;border-left:1px solid var(--rule)}
+td.best{font-weight:600;color:var(--ink)}
+td.txt,th.txt{text-align:left;white-space:normal;min-width:140px}
+td.txt{font-family:var(--sans);font-size:13.5px;line-height:1.45}
+.vt th{white-space:normal;vertical-align:bottom;line-height:1.3}
+.vt th,.vt td{padding:7px 9px}
+@media (max-width:560px){.strip>div+div,.stats>div+div{border-left:0;padding-left:0;border-top:1px solid var(--rule)} section.card{padding:14px}}
 </style>
 
 <div class="wrap">
@@ -95,6 +110,24 @@ code{font:12.5px var(--mono);background:var(--grid);padding:1px 5px;border-radiu
   </header>
 
   <div class="strip" id="strip"></div>
+
+  <section class="card" aria-labelledby="h-odds">
+    <div class="head">
+      <div><h2 id="h-odds">Odds by meeting</h2><p class="sub" id="odds-sub"></p></div>
+      <label class="k" for="odds-sel" style="display:flex;gap:8px;align-items:center">Meeting <select id="odds-sel"></select></label>
+    </div>
+    <div class="legend" id="lg-odds"></div>
+    <div class="chart" id="c-odds"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-track">
+    <div class="head">
+      <div><h2 id="h-track">Track record: probability on the actual decision</h2><p class="sub" id="track-sub"></p></div>
+      <div class="legend" id="lg-track"></div>
+    </div>
+    <div class="chart" id="c-track"></div>
+    <p class="note">Hollow markers are days flagged unreliable. The 2021 meetings were listed less than a month ahead, so they have no 1-month value.</p>
+  </section>
 
   <section class="card" aria-labelledby="h-path">
     <div class="head">
@@ -124,6 +157,14 @@ code{font:12.5px var(--mono);background:var(--grid);padding:1px 5px;border-radiu
     <div class="chart" id="c-hair"></div>
   </section>
 
+  <section class="card" aria-labelledby="h-err">
+    <div class="head">
+      <div><h2 id="h-err">Forecast errors by horizon</h2><p class="sub">For every reliable day: the implied upper bound minus the rate the Fed eventually set at that meeting. Negative means the market expected a lower rate than it got. Bars are the share of days in each 10bp bin; days beyond −120/+80bp are folded into the end bins.</p></div>
+    </div>
+    <div class="chart" id="c-err"></div>
+    <p class="note">Consecutive days forecasting the same meeting overlap heavily, so day counts overstate how many independent forecasts there are. There are 41 settled meetings behind these.</p>
+  </section>
+
   <section class="card" aria-labelledby="h-meet">
     <div class="head">
       <div><h2 id="h-meet">Meeting explorer</h2><p class="sub">Full life of one meeting's ladder: the implied rate, and the probability of each outcome.</p></div>
@@ -140,6 +181,55 @@ code{font:12.5px var(--mono);background:var(--grid);padding:1px 5px;border-radiu
   <section class="card" aria-labelledby="h-tbl">
     <div class="head"><div><h2 id="h-tbl">Meeting scorecard</h2><p class="sub">Implied upper bound on the last day before each meeting against the realized decision.</p></div></div>
     <div class="tbl"><table id="tbl"><thead><tr><th>Meeting</th><th>Event</th><th>Implied, day before</th><th>Realized</th><th>Change</th><th>Error (bp)</th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <div id="validation" class="part" hidden>
+    <div class="eyebrow">Method and validation</div>
+    <h2>Why this method, and how it holds up</h2>
+    <p class="lede">Our starting point is the Federal Reserve Board paper that first built these distributions. We reproduce its result, show where our method differs and why, and test both against the NY Fed's dealer survey.</p>
+  </div>
+
+  <section class="card" aria-labelledby="h-v1" data-validation hidden>
+    <div class="head"><div><h2 id="h-v1">Starting point: Diercks, Katz &amp; Wright (2026)</h2>
+      <p class="sub">Anthony Diercks, Jared Dean Katz and Jonathan Wright, <i>Kalshi and the Rise of Macro Markets</i>, NBER Working Paper 34702 / Federal Reserve FEDS 2026-010. They turn the same Kalshi ladders into daily distributions and find the mode was right the day before every FOMC meeting since 2022, beating fed funds futures. We follow their construction and change two steps.</p></div></div>
+    <div class="tbl" style="max-height:none"><table class="vt">
+      <thead><tr><th class="txt">Step</th><th class="txt">Diercks–Katz–Wright</th><th class="txt">Ours</th><th class="txt">Why we changed it</th></tr></thead>
+      <tbody>
+        <tr><td class="txt">Contract price</td><td class="txt">Last trade, carried forward on days without one</td><td class="txt">Bid/ask midpoint if the spread is ≤20¢; last trade clipped to the quote if ≤40¢; otherwise dropped</td><td class="txt" id="v-why-price"></td></tr>
+        <tr><td class="txt">Monotone ladder</td><td class="txt">Built outward from the mode toward the tails</td><td class="txt">Weighted isotonic fit: the closest non-increasing curve, tighter quotes weigh more</td><td class="txt">Uses every strike's information rather than trusting the mode's neighbours. Turns out to matter little once prices are current (see the ablation).</td></tr>
+        <tr><td class="txt">Unpriceable days</td><td class="txt">Kept</td><td class="txt">Flagged when more than 10% of probability sits outside or between usable strikes</td><td class="txt">Makes it visible when a number is extrapolation rather than market pricing.</td></tr>
+        <tr><td class="txt">Everything else</td><td class="txt" colspan="2">Same: price = risk-neutral probability, difference adjacent strikes, carry quiet days forward, take the mean, mode and median</td><td class="txt">Keeps the comparison to the two choices above.</td></tr>
+      </tbody></table></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-v2" data-validation hidden>
+    <div class="head"><div><h2 id="h-v2">Replication</h2><p class="sub" id="v2-sub"></p></div></div>
+    <div class="stats" id="v2-stats"></div>
+    <div class="tbl" style="max-height:none"><table id="v2-tbl" class="vt"></table></div>
+    <div class="head"><div><h2 style="font-size:16px">Error by days before the meeting</h2><p class="sub">Their Figure 1 layout: mean absolute error against the realized upper bound, averaged across meetings, 7-day smoothing.</p></div><div class="legend" id="lg-v2"></div></div>
+    <div class="chart" id="c-v2"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-v3" data-validation hidden>
+    <div class="head"><div><h2 id="h-v3">Why we changed it: which choice matters</h2><p class="sub">The two methods differ in two independent choices. Running all four combinations on the same meeting-days attributes the difference to each. Our quotes + isotonic cell reproduces the main series exactly. Values are mean absolute error in bp; lower is better.</p></div></div>
+    <div class="tbl" style="max-height:none"><table id="v3-tbl" class="vt"></table></div>
+    <div class="why" id="v3-why"></div>
+  </section>
+
+  <section class="card" aria-labelledby="h-v4" data-validation hidden>
+    <div class="head"><div><h2 id="h-v4">Outside benchmark: NY Fed dealer survey</h2><p class="sub" id="v4-sub"></p></div><div class="legend" id="lg-v4"></div></div>
+    <div class="chart" id="c-v4"></div>
+    <div class="tbl" style="max-height:none"><table id="v4-tbl" class="vt"></table></div>
+    <p class="note" id="v4-note"></p>
+  </section>
+
+  <section class="card" aria-labelledby="h-v5" data-validation hidden>
+    <div class="head"><div><h2 id="h-v5">What this does and doesn't show</h2></div></div>
+    <div class="why">
+      <div><h3>Supported</h3><p>Their day-before result replicates exactly, on their window and on 2021 and 2026, which they don't cover. Beyond a month, quote-based prices are more accurate and less noisy than last trades, and Kalshi's mode matches or beats the dealer survey at every horizon.</p></div>
+      <div><h3>Not yet shown</h3><p>None of the gaps has been tested for statistical significance (their paper uses Diebold–Mariano tests). Forecasts on consecutive days overlap, so the effective sample is closer to the 41 meetings than to thousands of days. The benchmark doesn't yet include fed funds futures or SOFR options.</p></div>
+      <div><h3>Assumptions</h3><p>Their paper doesn't state the time of day for the last trade; we use the end of each ET day. The survey comparison uses the dealer panel on each survey's due date, and skips the November 2022 to June 2023 surveys, which are published only as images.</p></div>
+    </div>
   </section>
 
   <section class="methods" aria-label="Method">
@@ -286,6 +376,102 @@ function drawPath() {
 }
 $("#path-note").textContent = skipped.length ? `Not shown: ${skipped.join(", ")}. Most strikes on these ladders are quoted with spreads of 50¢ or more, so too much of the probability can't be placed.` : "";
 
+/* ---------- 1b. odds by meeting ---------- */
+const oddsSel = $("#odds-sel");
+[...meetings].reverse().forEach(m => { if (m.meeting > next.meeting) return;
+  const o = document.createElement("option"); o.value = m.title;
+  o.textContent = `${fmtD(t(m.meeting))} · ${m.title}${m.title === next.title ? " (next)" : ""}`; oddsSel.appendChild(o); });
+oddsSel.value = next.title;
+oddsSel.addEventListener("change", drawOdds);
+const idxOnOrBefore = (m, date) => { let i = -1; m.d.forEach((d, k) => { if (d <= date) i = k; }); return i; };
+const shift = (date, days) => new Date(t(date) - days * 864e5).toISOString().slice(0, 10);
+function drawOdds() {
+  const host = $("#c-odds"); host.innerHTML = "";
+  const m = DATA.meetings[oddsSel.value], real = realized.find(r => r.event_ticker === m.title);
+  // Target in force going into the meeting: the last decision before it.
+  const prior = realized.filter(r => r.meeting_date < m.meeting).at(-1), T = prior ? prior.upper_bound : target.upper_bound;
+  const snaps = real
+    ? [["1 month before", shift(m.meeting, 30), "--s2"], ["1 week before", shift(m.meeting, 7), "--s3"], ["1 day before", shift(m.meeting, 1), "--s1"]]
+    : [["30 days ago", monthAgo, "--s2"], ["Today", asof, "--s1"]];
+  const series = snaps.map(([label, date, color]) => { const i = idxOnOrBefore(m, date);
+    return i < 0 ? null : { label: `${label} (${fmtD(t(m.d[i]))})`, color, row: m.p[i], rel: m.rel[i] }; }).filter(Boolean);
+  $("#odds-sub").textContent = real
+    ? `Market probability of each outcome for the ${fmtD(t(m.meeting))} decision. The Fed set ${pct(real.upper_bound)}. Labels are relative to the ${pct(T)} target going into the meeting.`
+    : `Market probability of each outcome for the ${fmtD(t(m.meeting))} decision: the ladder differenced into outcomes. Labels are relative to today's ${pct(T)} target.`;
+  legend($("#lg-odds"), series.map(x => ({ color: x.color, label: x.label + (x.rel ? "" : " · unreliable"), kind: "dot" })));
+  if (!series.length) { host.innerHTML = `<p class="note">No prices for this meeting at these dates.</p>`; return; }
+  const vals = m.keys.map(k => +k.split("_").at(-1));
+  const peak = vals.map((_, j) => Math.max(...series.map(x => x.row[j])));
+  let lo = peak.findIndex(v => v >= 0.02), hi = peak.length - 1 - [...peak].reverse().findIndex(v => v >= 0.02);
+  if (real) { const ri = vals.findIndex(v => Math.abs(v - real.upper_bound) < 1e-9); if (ri >= 0) { lo = Math.min(lo, ri); hi = Math.max(hi, ri); } }
+  const fold = row => vals.slice(lo, hi + 1).map((_, i) => { const j = lo + i;
+    return j === lo ? row.slice(0, lo + 1).reduce((a, b) => a + b, 0) : j === hi ? row.slice(hi).reduce((a, b) => a + b, 0) : row[j]; });
+  const S = series.map(x => fold(x.row));
+  const W = Math.max(host.clientWidth, 300), H = 260, mg = { l: 44, r: 10, t: 22, b: 48 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Outcome probabilities for the selected meeting" }, host);
+  const n = S[0].length, gw = (W - mg.l - mg.r) / n, k = S.length, bw = Math.min(40, gw * 0.8 / k);
+  const Y = v => mg.t + (1 - v) * (H - mg.t - mg.b);
+  [0, .25, .5, .75, 1].forEach(v => { el("line", { x1: mg.l, x2: W - mg.r, y1: Y(v), y2: Y(v), stroke: css("--grid") }, svg);
+    el("text", { x: mg.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = v * 100 + "%"; });
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+  for (let i = 0; i < n; i++) {
+    const j = lo + i, cx = mg.l + gw * (i + 0.5), val = vals[j];
+    const edge = i === 0 && lo > 0 ? "≤" : i === n - 1 && hi < vals.length - 1 ? "≥" : "";
+    const tag = Math.abs(val - T) < 1e-9 ? "hold" : (val > T ? "+" : "") + Math.round((val - T) * 100) + "bp";
+    const isReal = real && Math.abs(val - real.upper_bound) < 1e-9;
+    if (isReal) el("rect", { x: mg.l + gw * i + 2, y: mg.t - 16, width: gw - 4, height: H - mg.t - mg.b + 16, rx: 6, fill: css("--grid") }, svg);
+    S.forEach((row, si) => { const x = cx - (k * bw) / 2 + si * bw + 1, h = Y(0) - Y(row[i]), w = bw - 2;
+      if (h > 0) el("path", { d: `M${x},${Y(0)}V${Y(row[i]) + Math.min(4, h)}q0,-4 4,-4h${Math.max(0, w - 8)}q4,0 4,4V${Y(0)}Z`, fill: css(series[si].color) }, svg); });
+    const last = S.at(-1)[i];
+    if (last >= 0.02) el("text", { x: cx - (k * bw) / 2 + (k - 1) * bw + bw / 2, y: Y(last) - 6, "text-anchor": "middle", style: "fill:var(--ink)" }, svg).textContent = Math.round(last * 100) + "%";
+    if (isReal) el("text", { x: cx, y: mg.t - 4, "text-anchor": "middle", style: "fill:var(--ink);font-weight:500" }, svg).textContent = "Actual";
+    el("text", { x: cx, y: H - 26, "text-anchor": "middle", style: "fill:var(--ink-2)" }, svg).textContent = edge + val.toFixed(2) + "%";
+    el("text", { x: cx, y: H - 10, "text-anchor": "middle" }, svg).textContent = edge + tag;
+    const hit = el("rect", { x: mg.l + gw * i, y: mg.t, width: gw, height: H - mg.t - mg.b, fill: "transparent" }, svg);
+    const show = () => { tip.innerHTML = `<b>${edge}${val.toFixed(2)}% · ${edge}${tag}${isReal ? " · actual" : ""}</b>` +
+      series.map((x, si) => `<div class="r"><span><i class="sw dot" style="background:var(${x.color})"></i>${x.label}</span><span>${(S[si][i] * 100).toFixed(1)}%</span></div>`).join("");
+      tip.hidden = false; const r = svg.getBoundingClientRect(), px = cx * r.width / W;
+      tip.style.top = "0px"; tip.style.left = (px + 14 + tip.offsetWidth > r.width ? px - 14 - tip.offsetWidth : px + 14) + "px"; };
+    hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show); hit.addEventListener("pointerleave", () => tip.hidden = true);
+  }
+  el("line", { x1: mg.l, x2: W - mg.r, y1: Y(0), y2: Y(0), stroke: css("--rule") }, svg);
+}
+
+/* ---------- 1c. track record ---------- */
+const TR = DATA.track;
+const med = key => median(TR.filter(r => r[key] != null).map(r => r[key]));
+$("#track-sub").textContent = `For each settled meeting, the probability the market put on the decision the Fed actually made. Median: ${Math.round(med("p_1d") * 100)}% a day before, ${Math.round(med("p_1w") * 100)}% a week before, ${Math.round(med("p_1m") * 100)}% a month before. Click a meeting to see its odds above.`;
+legend($("#lg-track"), [{ color: "--s2", label: "1 month before", kind: "dot" }, { color: "--s3", label: "1 week before", kind: "dot" }, { color: "--s1", label: "1 day before", kind: "dot" }]);
+function drawTrack() {
+  const host = $("#c-track"); host.innerHTML = "";
+  const W = Math.max(host.clientWidth, 300), H = 280, mg = { l: 44, r: 10, t: 10, b: 30 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Probability on the actual decision for each meeting" }, host);
+  const n = TR.length, gw = (W - mg.l - mg.r) / n, Y = v => mg.t + (1 - v) * (H - mg.t - mg.b);
+  [0, .25, .5, .75, 1].forEach(v => { el("line", { x1: mg.l, x2: W - mg.r, y1: Y(v), y2: Y(v), stroke: css("--grid") }, svg);
+    el("text", { x: mg.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = v * 100 + "%"; });
+  let yr = null;
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+  TR.forEach((r, i) => {
+    const cx = mg.l + gw * (i + 0.5), y = r.meeting_date.slice(0, 4);
+    if (y !== yr) { yr = y; el("text", { x: cx, y: H - 8, "text-anchor": "start" }, svg).textContent = y;
+      if (i) el("line", { x1: cx - gw / 2, x2: cx - gw / 2, y1: mg.t, y2: H - mg.b, stroke: css("--grid") }, svg); }
+    const ps = [["p_1m", "--s2"], ["p_1w", "--s3"], ["p_1d", "--s1"]].filter(([key]) => r[key] != null);
+    const ys = ps.map(([key]) => Y(r[key]));
+    if (ys.length > 1) el("line", { x1: cx, x2: cx, y1: Math.min(...ys), y2: Math.max(...ys), stroke: css("--rule"), "stroke-width": 2 }, svg);
+    ps.forEach(([key, color]) => { const rel = r["reliable_" + key.slice(2)];
+      el("circle", { cx, cy: Y(r[key]), r: Math.min(5, gw / 2.4), fill: rel ? css(color) : css("--surface"), stroke: rel ? css("--surface") : css(color), "stroke-width": rel ? 1.5 : 2 }, svg); });
+    const hit = el("rect", { x: mg.l + gw * i, y: mg.t, width: gw, height: H - mg.t - mg.b, fill: "transparent", style: "cursor:pointer" }, svg);
+    const show = () => { tip.innerHTML = `<b>${fmtD(t(r.meeting_date))} · set ${pct(r.realized)}</b>` +
+      [["1 day before", "p_1d", "--s1"], ["1 week before", "p_1w", "--s3"], ["1 month before", "p_1m", "--s2"]].map(([lab, key, c]) =>
+        `<div class="r"><span><i class="sw dot" style="background:var(${c})"></i>${lab}</span><span>${r[key] == null ? "–" : (r[key] * 100).toFixed(0) + "%"}</span></div>`).join("");
+      tip.hidden = false; const rr = svg.getBoundingClientRect(), px = cx * rr.width / W;
+      tip.style.top = "0px"; tip.style.left = (px + 14 + tip.offsetWidth > rr.width ? px - 14 - tip.offsetWidth : px + 14) + "px"; };
+    hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show); hit.addEventListener("pointerleave", () => tip.hidden = true);
+    hit.addEventListener("click", () => { oddsSel.value = r.event_ticker; drawOdds(); $("#h-odds").scrollIntoView({ behavior: "smooth", block: "start" }); });
+  });
+  el("line", { x1: mg.l, x2: W - mg.r, y1: Y(0), y2: Y(0), stroke: css("--rule") }, svg);
+}
+
 /* ---------- 2. history ---------- */
 const H = DATA.horizon, H_ = H, hx = H.date.map(t);
 const hSeries = [
@@ -351,6 +537,45 @@ function drawHair() {
   };
   hit.addEventListener("pointermove", move); hit.addEventListener("pointerdown", move);
   hit.addEventListener("pointerleave", () => { tip.hidden = true; hl.setAttribute("visibility", "hidden"); });
+}
+
+/* ---------- 2c. forecast error histograms ---------- */
+function drawErr() {
+  const host = $("#c-err"); host.innerHTML = "";
+  const panels = [["next", "Next meeting (0–7 weeks)", "--s1"], ["third", "3rd meeting out (~4 months)", "--s2"], ["sixth", "6th meeting out (~9 months)", "--s3"]];
+  const lo = -120, hi = 80, bw = 10, nb = (hi - lo) / bw;
+  const W = Math.max(host.clientWidth, 300), ph = 118, gap = 46, m = { l: 44, r: 10, t: 22, b: 46 };
+  const H = m.t + panels.length * ph + (panels.length - 1) * gap + m.b;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Histograms of forecast errors by horizon" }, host);
+  const X = v => m.l + (v - lo) / (hi - lo) * (W - m.l - m.r);
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+  panels.forEach(([key, label, color], pi) => {
+    const e = DATA.errors[key], counts = new Array(nb).fill(0);
+    e.forEach(v => counts[Math.min(nb - 1, Math.max(0, Math.floor((v - lo) / bw)))]++);
+    const share = counts.map(c => c / e.length), top = Math.max(...share) * 1.1;
+    const y0 = m.t + pi * (ph + gap), Y = v => y0 + (1 - v / top) * ph;
+    const mean = e.reduce((a, b) => a + b, 0) / e.length, mae = e.reduce((a, b) => a + Math.abs(b), 0) / e.length;
+    el("text", { x: m.l, y: y0 - 8, style: "fill:var(--ink);font-size:12px" }, svg).textContent =
+      `${label} · mean ${mean >= 0 ? "+" : ""}${mean.toFixed(1)}bp · mean |error| ${mae.toFixed(1)}bp · ${e.length.toLocaleString()} days`;
+    const tstep = top > 0.3 ? 0.2 : top > 0.12 ? 0.1 : 0.05;
+    for (let v = 0; v <= top; v += tstep) { el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: css("--grid") }, svg);
+      el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = Math.round(v * 100) + "%"; }
+    share.forEach((v, i) => {
+      const x = X(lo + i * bw) + 1, w = X(lo + (i + 1) * bw) - X(lo + i * bw) - 2, h = Y(0) - Y(v);
+      if (h > 0) el("path", { d: `M${x},${Y(0)}V${Y(v) + Math.min(3, h)}q0,-3 3,-3h${Math.max(0, w - 6)}q3,0 3,3V${Y(0)}Z`, fill: css(color) }, svg);
+      const hit = el("rect", { x: X(lo + i * bw), y: y0, width: X(lo + bw) - X(lo), height: ph, fill: "transparent" }, svg);
+      const a = lo + i * bw, b = a + bw, lab = i === 0 ? `below ${a + bw}bp` : i === nb - 1 ? `above ${a}bp` : `${a > 0 ? "+" : ""}${a} to ${b > 0 ? "+" : ""}${b}bp`;
+      const show = () => { tip.innerHTML = `<b>${label}</b><div class="r"><span>${lab}</span><span>${(v * 100).toFixed(1)}% · ${counts[i]} days</span></div>`;
+        tip.hidden = false; const r = svg.getBoundingClientRect(), px = (x + w / 2) * r.width / W;
+        tip.style.top = (y0 * r.height / H) + "px"; tip.style.left = (px + 14 + tip.offsetWidth > r.width ? px - 14 - tip.offsetWidth : px + 14) + "px"; };
+      hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show); hit.addEventListener("pointerleave", () => tip.hidden = true);
+    });
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), stroke: css("--rule") }, svg);
+    el("line", { x1: X(0), x2: X(0), y1: y0, y2: Y(0), stroke: css("--ink"), "stroke-width": 1 }, svg);
+    el("line", { x1: X(mean), x2: X(mean), y1: y0, y2: Y(0), stroke: css("--ink"), "stroke-width": 1, "stroke-dasharray": "3 3" }, svg);
+  });
+  for (let v = lo; v <= hi; v += 20) el("text", { x: X(v), y: H - 28, "text-anchor": "middle" }, svg).textContent = v > 0 ? "+" + v : v;
+  el("text", { x: W - m.r, y: H - 4, "text-anchor": "end" }, svg).textContent = "implied − realized (bp) · solid = 0 · dashed = mean";
 }
 
 /* ---------- 3. meeting explorer ---------- */
@@ -441,7 +666,108 @@ const tb = $("#tbl tbody");
   tb.appendChild(tr);
 });
 
-function drawAll() { drawPath(); drawHist(); drawHair(); drawMeet(); }
+/* ---------- 5. method and validation ---------- */
+const V = DATA.validation;
+if (V) {
+  document.querySelectorAll("#validation, [data-validation]").forEach(e => e.hidden = false);
+  const C0 = Object.fromEntries(V.comparison.map(r => [r.method, r]));
+  const dk = C0["DKW (last trade, mode-outward)"], us = C0["Ours (quotes, isotonic)"];
+  const f1 = v => v == null ? "–" : v.toFixed(1);
+  $("#v-why-price").textContent = `A last trade can be old. ${Math.round(V.stale_share["1"] * 100)}% of last-trade prices are more than a week old even the day before a meeting, mostly on thinly traded strikes. A live quote reflects what the market will trade at today.`;
+  $("#v2-sub").textContent = `We rebuilt their method from ${V.n_trades.toLocaleString()} individual Kalshi trades and scored both methods on the same ${us["meeting-days"].toLocaleString()} meeting-days (1 to 160 days before each of ${us.meetings} settled meetings, July 2021 to September 2026).`;
+  $("#v2-stats").innerHTML = `
+    <div><span class="k">Their method · mode, day before</span><span class="v">${Math.round(dk["mode right, 1 day before"] * dk.meetings)} of ${dk.meetings}</span><span class="sub">Their headline result, reproduced</span></div>
+    <div><span class="k">Our method · mode, day before</span><span class="v">${Math.round(us["mode right, 1 day before"] * us.meetings)} of ${us.meetings}</span><span class="sub">Same result</span></div>
+    <div><span class="k">Average error, 1–160 days</span><span class="v">${f1(dk["MAE mean, 1–160 days"])} → ${f1(us["MAE mean, 1–160 days"])}<small> bp</small></span><span class="sub">Theirs → ours, implied rate</span></div>`;
+  const rows = [["Mode right, 1 day before", "mode right, 1 day before", "pct"], ["Error of the mean, 1 day before", "MAE mean, 1 day (bp)"], ["… 1 week before", "MAE mean, 1 week"],
+    ["… 1 month before", "MAE mean, 1 month"], ["… 3 months before", "MAE mean, 3 months"], ["… averaged over 1–160 days", "MAE mean, 1–160 days"],
+    ["Error of the mode, 1–160 days", "MAE mode, 1–160 days"], ["Average day-to-day change", "avg daily change (bp)"]];
+  const cols = [["DKW (last trade, mode-outward)", "Theirs"], ["Ours (quotes, isotonic)", "Ours"], ["DKW · their window 2022–25", "Theirs · 2022–25"],
+    ["Ours · their window 2022–25", "Ours · 2022–25"], ["DKW · our reliable days only", "Theirs · reliable days"], ["Ours · reliable days only", "Ours · reliable days"]];
+  const cell = (v, kind) => kind === "pct" ? Math.round(v * 100) + "%" : f1(v);
+  $("#v2-tbl").innerHTML = `<thead><tr><th class="txt">Error vs realized (bp)</th>${cols.map(c => `<th>${c[1]}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map(([lab, k, kind]) => `<tr><td class="txt">${lab}</td>` + cols.map(([m], i) => {
+      const v = C0[m][k], pair = C0[cols[i % 2 ? i - 1 : i + 1][0]][k];
+      const best = kind !== "pct" && v < pair - 0.05; return `<td class="${best ? "best" : ""}">${cell(v, kind)}</td>`; }).join("") + "</tr>").join("") + "</tbody>";
+
+  legend($("#lg-v2"), [{ color: "--s1", label: "Ours: mean" }, { color: "--s1", label: "Ours: mode", kind: "dash" }, { color: "--s2", label: "Theirs: mean" }, { color: "--s2", label: "Theirs: mode", kind: "dash" }]);
+  window.drawV2 = () => {
+    const host = $("#c-v2"); host.innerHTML = "";
+    const cv = V.curves, H = cv.h, W = Math.max(host.clientWidth, 300), Ht = 300, m = { l: 44, r: 14, t: 10, b: 34 };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${Ht}`, height: Ht, role: "img", "aria-label": "Forecast error by days before the meeting, both methods" }, host);
+    const ser = [["ours_mean", "--s1", "", "Ours: mean"], ["ours_mode", "--s1", "5 4", "Ours: mode"], ["dkw_mean", "--s2", "", "Theirs: mean"], ["dkw_mode", "--s2", "5 4", "Theirs: mode"]];
+    const ymax = Math.ceil(Math.max(...ser.flatMap(s => cv[s[0]])) / 10) * 10;
+    const X = h => m.l + (160 - h) / 159 * (W - m.l - m.r), Y = v => m.t + (1 - v / ymax) * (Ht - m.t - m.b);
+    for (let v = 0; v <= ymax; v += 10) { el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: css("--grid") }, svg);
+      el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = v; }
+    [160, 120, 90, 60, 30, 1].forEach(h => el("text", { x: X(h), y: Ht - 16, "text-anchor": "middle" }, svg).textContent = h);
+    el("text", { x: (m.l + W - m.r) / 2, y: Ht - 2, "text-anchor": "middle" }, svg).textContent = "days before the FOMC meeting";
+    ser.forEach(([k, c, dash]) => el("path", { d: H.map((h, i) => (i ? "L" : "M") + X(h).toFixed(1) + "," + Y(cv[k][i]).toFixed(1)).join(""),
+      fill: "none", stroke: css(c), "stroke-width": 2, "stroke-dasharray": dash }, svg));
+    const cross = el("line", { y1: m.t, y2: Ht - m.b, stroke: css("--ink-3"), visibility: "hidden" }, svg);
+    const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+    const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: Ht - m.t - m.b, fill: "transparent" }, svg);
+    const move = ev => { const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width;
+      const h = Math.max(1, Math.min(160, Math.round(160 - (px - m.l) / (W - m.l - m.r) * 159))), i = H.indexOf(h); if (i < 0) return;
+      cross.setAttribute("x1", X(h)); cross.setAttribute("x2", X(h)); cross.setAttribute("visibility", "visible");
+      tip.innerHTML = `<b>${h} day${h > 1 ? "s" : ""} before</b>` + ser.map(([k, c, , lab]) => `<div class="r"><span><i class="sw" style="background:var(${c})"></i>${lab}</span><span>${cv[k][i].toFixed(1)}bp</span></div>`).join("");
+      tip.hidden = false; const hx2 = X(h) * r.width / W; tip.style.top = "8px";
+      tip.style.left = (hx2 + 14 + tip.offsetWidth > r.width ? hx2 - 14 - tip.offsetWidth : hx2 + 14) + "px"; };
+    hit.addEventListener("pointermove", move); hit.addEventListener("pointerdown", move);
+    hit.addEventListener("pointerleave", () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); });
+  };
+
+  const A = Object.fromEntries(V.ablation.map(r => [r.price + "|" + r.monotonicity, r]));
+  const acol = [["MAE mean, 1 day", "Mean, 1 day"], ["MAE mean, 1 month", "Mean, 1 month"], ["MAE mean, 3 months", "Mean, 3 months"],
+    ["MAE mean, 1–160 days", "Mean, 1–160 days"], ["MAE mode, 1–160 days", "Mode, 1–160 days"], ["avg daily change", "Daily change"]];
+  const combos = [["Last trade", "Mode-outward", "Theirs"], ["Last trade", "Isotonic", ""], ["Quotes", "Mode-outward", ""], ["Quotes", "Isotonic", "Ours"]];
+  const mins = Object.fromEntries(acol.map(([k]) => [k, Math.min(...V.ablation.map(r => r[k]))]));
+  $("#v3-tbl").innerHTML = `<thead><tr><th class="txt">Price</th><th class="txt">Monotone ladder</th>${acol.map(c => `<th>${c[1]}</th>`).join("")}</tr></thead><tbody>` +
+    combos.map(([p, mo, tag]) => { const r = A[p + "|" + mo];
+      return `<tr><td class="txt">${p}${tag ? ` <span class="pill" style="padding:2px 6px">${tag}</span>` : ""}</td><td class="txt">${mo}</td>` +
+        acol.map(([k]) => `<td class="${r[k] - mins[k] < 0.05 ? "best" : ""}">${f1(r[k])}</td>`).join("") + "</tr>"; }).join("") + "</tbody>";
+  const LT = A["Last trade|Mode-outward"], LI = A["Last trade|Isotonic"], QM = A["Quotes|Mode-outward"], QI = A["Quotes|Isotonic"];
+  const rel = [C0["DKW · our reliable days only"], C0["Ours · reliable days only"]];
+  $("#v3-why").innerHTML = `
+    <div><h3>Pricing is what matters</h3><span class="fig">${f1(LT["MAE mean, 1–160 days"])} → ${f1(QM["MAE mean, 1–160 days"])}bp</span>
+      <p>Keeping their mode-outward rule and only switching from last trades to quotes cuts the average error by ${f1(LT["MAE mean, 1–160 days"] - QM["MAE mean, 1–160 days"])}bp, and by ${f1(LT["MAE mean, 3 months"] - QM["MAE mean, 3 months"])}bp three months out. ${Math.round(V.stale_share["30"] * 100)}–${Math.round(V.stale_share["7"] * 100)}% of last-trade prices are more than a week old at any horizon.</p></div>
+    <div><h3>The monotone rule barely matters with fresh prices</h3><span class="fig">${f1(QM["MAE mean, 1–160 days"])} vs ${f1(QI["MAE mean, 1–160 days"])}bp</span>
+      <p>With quotes, mode-outward and isotonic give almost the same result. With stale trades, their mode-outward rule is the better choice near the meeting (${f1(LT["MAE mean, 1 day"])} vs ${f1(LI["MAE mean, 1 day"])}bp the day before), because it keeps stale tail prices from pulling on the centre. Their design is sensible for their pricing choice.</p></div>
+    <div><h3>The gain isn't from filtering</h3><span class="fig">${f1(rel[0]["MAE mean, 1–160 days"])} vs ${f1(rel[1]["MAE mean, 1–160 days"])}bp</span>
+      <p>Restricting both methods to the days our reliability flag passes lowers both errors but keeps the gap, so our advantage doesn't come from dropping hard days.</p></div>`;
+
+  const S = V.survey, bands = S.table.filter(r => r.band !== "All horizons"), all = S.table.find(r => r.band === "All horizons");
+  const sser = [["NY Fed survey (median of modes)", "--ink-3", "Dealer survey"], ["Kalshi mode (ours)", "--s1", "Kalshi mode (ours)"], ["Kalshi mean (ours)", "--s3", "Kalshi mean (ours)"], ["Kalshi mean (DKW)", "--s2", "Kalshi mean (theirs)"]];
+  $("#v4-sub").textContent = `Before each FOMC meeting the New York Fed asks primary dealers for their most likely target rate after each upcoming meeting. We compare the median dealer forecast with Kalshi on each survey's due date: ${S.n_forecasts} forecasts from ${S.n_surveys} surveys covering ${S.n_meetings} meetings. The survey is a modal forecast, so Kalshi's mode is the like-for-like comparison.`;
+  legend($("#lg-v4"), sser.map(([, c, lab]) => ({ color: c, label: lab, kind: "dot" })));
+  $("#v4-tbl").innerHTML = `<thead><tr><th class="txt">Horizon</th><th>Forecasts</th>${sser.map(s => `<th>${s[2]}</th>`).join("")}<th>Kalshi mode (theirs)</th></tr></thead><tbody>` +
+    S.table.map(r => { const mn = Math.min(...sser.map(s => r[s[0]]), r["Kalshi mode (DKW)"]);
+      return `<tr><td class="txt">${r.band}</td><td>${r.forecasts}</td>` + [...sser.map(s => r[s[0]]), r["Kalshi mode (DKW)"]].map(v => `<td class="${v - mn < 0.05 ? "best" : ""}">${f1(v)}</td>`).join("") + "</tr>"; }).join("") + "</tbody>";
+  $("#v4-note").textContent = `Mean absolute error against the realized upper bound, in bp; bold is the lowest in each row. Exactly right: survey ${Math.round(S.exactly_right["NY Fed survey (median of modes)"] * 100)}%, Kalshi mode (ours) ${Math.round(S.exactly_right["Kalshi mode (ours)"] * 100)}%, Kalshi mode (theirs) ${Math.round(S.exactly_right["Kalshi mode (DKW)"] * 100)}%. The sample is limited to meetings whose ladder is reliably priced on the survey date. ${S.n_surveys_parsed} dealer surveys (${S.first} to ${S.last}) were read.`;
+  window.drawV4 = () => {
+    const host = $("#c-v4"); host.innerHTML = "";
+    const W = Math.max(host.clientWidth, 300), Ht = 260, m = { l: 44, r: 10, t: 12, b: 44 };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${Ht}`, height: Ht, role: "img", "aria-label": "Forecast error by horizon: dealer survey vs Kalshi" }, host);
+    const ymax = Math.ceil(Math.max(...bands.flatMap(r => sser.map(s => r[s[0]]))) / 10) * 10, Y = v => m.t + (1 - v / ymax) * (Ht - m.t - m.b);
+    for (let v = 0; v <= ymax; v += 10) { el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: css("--grid") }, svg);
+      el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = v; }
+    const gw = (W - m.l - m.r) / bands.length, bw = Math.min(34, gw * 0.8 / sser.length);
+    const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+    bands.forEach((r, i) => { const cx = m.l + gw * (i + 0.5);
+      sser.forEach(([k, c], si) => { const x = cx - (sser.length * bw) / 2 + si * bw + 1, h = Y(0) - Y(r[k]), w = bw - 2;
+        if (h > 0) el("path", { d: `M${x},${Y(0)}V${Y(r[k]) + Math.min(4, h)}q0,-4 4,-4h${Math.max(0, w - 8)}q4,0 4,4V${Y(0)}Z`, fill: css(c) }, svg); });
+      el("text", { x: cx, y: Ht - 24, "text-anchor": "middle", style: "fill:var(--ink-2)" }, svg).textContent = r.band;
+      el("text", { x: cx, y: Ht - 8, "text-anchor": "middle" }, svg).textContent = r.forecasts + " forecasts";
+      const hit = el("rect", { x: m.l + gw * i, y: m.t, width: gw, height: Ht - m.t - m.b, fill: "transparent" }, svg);
+      const show = () => { tip.innerHTML = `<b>${r.band} before the meeting</b>` + sser.map(([k, c, lab]) => `<div class="r"><span><i class="sw dot" style="background:var(${c})"></i>${lab}</span><span>${f1(r[k])}bp</span></div>`).join("");
+        tip.hidden = false; const rr = svg.getBoundingClientRect(), px = cx * rr.width / W;
+        tip.style.top = "0px"; tip.style.left = (px + 14 + tip.offsetWidth > rr.width ? px - 14 - tip.offsetWidth : px + 14) + "px"; };
+      hit.addEventListener("pointermove", show); hit.addEventListener("pointerdown", show); hit.addEventListener("pointerleave", () => tip.hidden = true); });
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), stroke: css("--rule") }, svg);
+  };
+}
+
+function drawAll() { drawOdds(); drawTrack(); drawPath(); drawHist(); drawHair(); drawErr(); drawMeet(); if (window.drawV2) { drawV2(); drawV4(); } }
 drawAll();
 let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(drawAll, 120); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
