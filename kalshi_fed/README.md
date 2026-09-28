@@ -11,8 +11,9 @@ Data as of **2026-09-27**: 52 FOMC meetings, 660 contracts, about 98,000 daily p
 | `kalshi_fed_funds.ipynb` | The full pipeline: download, compute, charts, scorecard. Run top to bottom. |
 | `fetch_kalshi_fed.py`, `build_series.py` | The same pipeline as scripts, plus they rebuild `fed_curve.html`. |
 | `fed_curve.html` | Interactive version of the charts (self-contained page). |
-| `data/implied_rate_daily.csv` | **Main output.** One row per meeting per day: implied upper bound, outcome distribution, reliability flag. |
-| `data/constant_horizon.csv` | One row per day: implied rate for the next, 3rd and 6th upcoming meeting, and the target in force. |
+| `data/implied_rate_daily.csv` | **Main output.** One row per meeting per day: implied upper bound, implied EFFR, outcome distribution, reliability flag. |
+| `data/constant_horizon.csv` | One row per day: implied rate (upper bound and EFFR basis) for the next, 3rd and 6th upcoming meeting, the target in force, and actual EFFR. |
+| `data/fred_effr.csv` | Daily EFFR and target upper bound from FRED. |
 | `data/candles_daily.csv` | Raw daily bid, ask, last trade, volume and open interest for every contract. |
 | `data/markets.csv` | One row per contract with strike and settlement result. |
 | `data/meeting_summary.csv` | Scorecard: implied rate the day before each meeting vs the decision. |
@@ -63,6 +64,14 @@ In those cases the mean depends on where the unplaced probability is assumed to 
 
 **7. Constant-horizon series.** For each day, the next, 3rd and 6th upcoming meetings are identified, and their implied rates are recorded that day. Because FOMC meetings are about 6–7 weeks apart, "3rd meeting" is roughly 4 months out and "6th meeting" roughly 9 months. The horizon is counted in meetings, not fixed calendar days.
 
+**8. Implied effective rate (EFFR).** Kalshi settles on the target's upper bound. Fed funds futures, and most rates research, use the effective rate: the volume-weighted rate banks actually pay, which trades inside the range. To put Kalshi on that basis:
+
+`implied_effr = implied_upper_bound + (EFFR − upper bound)`
+
+The gap is the median of the last 20 published days as of each date, so each row only uses information available then. The data comes from FRED series `EFFR` and `DFEDTARU`. The gap averaged −17bp from 2021 through 2024, −16bp in 2025 and −12bp in 2026, as bank reserves got scarcer.
+
+**9. Hair chart.** On the first trading day of each month, the implied upper bound for every reliably priced upcoming meeting is joined into one path, starting from the target in force that day. Drawing all of these against the realized target shows every forecast at once.
+
 ## Assumptions and limitations
 
 - **The target is on the 25bp grid.** Outcomes between strikes are assumed to be the 25bp steps in between. An off-grid move (for example 10bp) would be misplaced.
@@ -71,6 +80,7 @@ In those cases the mean depends on where the unplaced probability is assumed to 
 - **Daily closes.** Bars close at midnight ET, so each day is an end-of-day snapshot. Intraday moves (a CPI release, the minutes after an FOMC statement) are only seen through that day's close. Pass `INTERVAL = 60` or `1` for hourly or minute bars.
 - **Stale quotes.** Carrying quotes forward assumes an untouched quote is still live. For thinly traded ladders that can hold a price for weeks.
 - **Liquidity varies a lot.** Meetings more than about 4 months out are often quoted with spreads of 50–98¢. That is why the 6th-meeting series covers only 25% of days, and why meetings from March 2027 on don't have reliable values yet.
+- **EFFR gap held constant.** The implied EFFR assumes today's EFFR − upper bound gap holds through every future meeting. It has moved by about 5bp over two years, so the implied EFFR for distant meetings carries a few basis points of extra uncertainty.
 - **Meeting date.** The meeting date is taken from each contract's close time. For some 2021 contracts this is the day before the decision.
 
 ## Results
@@ -108,11 +118,21 @@ A negative error means the market expected a lower rate than what happened. The 
 - **2024–2025 (cutting cycle):** close to unbiased at every horizon (−8bp to +2bp).
 - **2026:** the market again underpriced tightening. In 2026 the 3rd-meeting forecast averaged 17bp too low, ahead of the September 2026 hike to 4.00%.
 
-This is consistent with the well-known finding for fed funds futures: forecasts beyond the next couple of meetings drift toward the current policy stance and underreact to turning points. It's the same data, but Kalshi prices it contract by contract.
+This matches the well-known pattern in fed funds futures: forecasts beyond the next couple of meetings underreact to turning points. We haven't compared Kalshi against futures directly yet; the implied EFFR column puts the two on the same basis for that.
+
+### Every implied path at once
+
+The hair chart makes the same point visually:
+
+- **2022:** almost every hair falls below the target line. For the December 2022 meeting, the path priced in March 2022 expected 1.65%, June 2.63% and September 3.84%. The Fed went to 4.50%.
+- **2023:** hairs repeatedly bend down from the 5.50% plateau, pricing cuts that took until September 2024 to arrive.
+- **2024–2025:** hairs mostly lie on top of the cutting path.
+- **2026:** hairs point down toward about 3% in 2027 while the Fed hiked to 4.00%. Only the most recent paths turn up.
 
 ### Where things stand (2026-09-27)
 
 - Target upper bound: **4.00%**, set on Sep 16, 2026 after a 25bp hike.
-- **Oct 28, 2026:** implied 4.16%, with about a 64% chance of another hike, 35% hold and 1% cut.
-- **Dec 9, 2026:** implied 4.35%.
+- Actual EFFR: 3.88% (Sep 25), about 12bp below the upper bound.
+- **Oct 28, 2026:** implied 4.16% upper bound, 4.04% on an EFFR basis, with about a 64% chance of another hike, 35% hold and 1% cut.
+- **Dec 9, 2026:** implied 4.35% upper bound, 4.23% EFFR.
 - Jan 2027 onward: ladders are too thinly quoted to price reliably today. The Jun 2027 through Jan 2028 meetings were only listed on Sep 18, 2026.

@@ -3,20 +3,66 @@
 Outputs:
   data/realized_target.csv    upper bound after each settled meeting
   data/meeting_summary.csv    implied rate the day before each meeting vs outcome
-  data/constant_horizon.csv   per date: implied upper bound for the next,
-                              3rd and 6th upcoming meeting (+ current target);
-                              only days flagged reliable are used
+  data/constant_horizon.csv   per date: implied upper bound (and implied EFFR)
+                              for the next, 3rd and 6th upcoming meeting, plus
+                              the target in force and actual EFFR; only days
+                              flagged reliable are used
+  data/fred_effr.csv          EFFR and target upper bound from FRED (cached)
+  data/implied_rate_daily.csv adds effr_spread and implied_effr columns
   data/chart_data.json        compact payload for the HTML chart
   fed_curve.html              interactive chart (template + payload)
 """
+import argparse
+import io
 import json
+import os
+import ssl
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
 
+ap = argparse.ArgumentParser()
+ap.add_argument("--refresh-fred", action="store_true", help="re-download FRED data")
+args = ap.parse_args()
+
 D = Path(__file__).resolve().parent / "data"
 m = pd.read_csv(D / "markets.csv")
 r = pd.read_csv(D / "implied_rate_daily.csv")
+
+
+def fred(series):
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context(
+            cafile="/etc/ssl/cert.pem" if os.path.exists("/etc/ssl/cert.pem") else None)
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}&cosd=2021-01-01"
+    d = pd.read_csv(io.StringIO(urllib.request.urlopen(url, timeout=30, context=ctx).read().decode()))
+    d.columns = ["date", series]
+    d[series] = pd.to_numeric(d[series], errors="coerce")
+    return d
+
+
+# Implied EFFR. Kalshi settles on the target's upper bound; fed funds futures
+# settle on the effective rate, which trades inside the range. Add the recent
+# EFFR - upper bound gap: median of the last 20 published days, so each date
+# only uses information available then.
+fred_path = D / "fred_effr.csv"
+if args.refresh_fred or not fred_path.exists():
+    fred("EFFR").merge(fred("DFEDTARU"), on="date", how="outer").sort_values("date") \
+        .to_csv(fred_path, index=False)
+fr = pd.read_csv(fred_path)
+fr["gap"] = fr.EFFR - fr.DFEDTARU
+gap = fr.dropna(subset=["gap"]).set_index("date").gap.rolling(20, min_periods=5).median()
+days = pd.date_range(fr.date.min(), max(fr.date.max(), r.date.max())).strftime("%Y-%m-%d")
+gap = gap.reindex(days).ffill()
+effr = fr.set_index("date").EFFR.reindex(days)
+r = r.drop(columns=["effr_spread", "implied_effr"], errors="ignore")
+r["effr_spread"] = r.date.map(gap).round(4)
+r["implied_effr"] = (r.implied_upper_bound + r.effr_spread).round(4)
+r.to_csv(D / "implied_rate_daily.csv", index=False)
 
 settled = m[m.result.isin(["yes", "no"])]
 realized = settled.groupby(["event_ticker", "meeting_date"]).apply(
@@ -40,13 +86,26 @@ rows = []
 for d in sorted(r.date.unique()):
     upcoming = [x for x in meetings if x >= d]
     past = realized[realized.meeting_date < d]
-    row = {"date": d, "current_target": past.upper_bound.iloc[-1] if len(past) else None}
+    row = {"date": d, "current_target": past.upper_bound.iloc[-1] if len(past) else None,
+           "effr": effr.get(d), "effr_spread": gap.get(d)}
     for name, i in (("next", 0), ("third", 2), ("sixth", 5)):
         mt = upcoming[i] if i < len(upcoming) else None
         row[f"{name}_meeting"] = mt
         row[f"{name}_implied"] = lookup.get((mt, d)) if mt else None
+        row[f"{name}_implied_effr"] = row[f"{name}_implied"] + gap.get(d) \
+            if row[f"{name}_implied"] is not None and pd.notna(gap.get(d)) else None
     rows.append(row)
 ch = pd.DataFrame(rows)
+
+# Hair chart: on the first trading day of each month, the implied path through
+# every upcoming meeting that's reliably priced, starting from the target in force.
+hairs = []
+for d in ch.groupby(ch.date.str[:7]).date.min():
+    snap = r[(r.date == d) & r.reliable & (r.meeting_date >= d)].sort_values("meeting_date")
+    tgt = ch.loc[ch.date == d, "current_target"].iloc[0]
+    if len(snap) and pd.notna(tgt):
+        hairs.append({"d": d, "pts": [[d, float(tgt)]] +
+                      [[a, round(b, 4)] for a, b in zip(snap.meeting_date, snap.implied_upper_bound)]})
 ch.to_csv(D / "constant_horizon.csv", index=False)
 
 def on_grid(d):
@@ -91,6 +150,8 @@ payload = {
     "n_contracts": len(m),
     "meetings": meet,
     "realized": real.astype(object).where(real.notna(), None).to_dict("records"),
+    "hairs": hairs,
+    "effr_gap": round(float(gap.get(r.date.max())), 4),
     "horizon": {c: ch[c].astype(object).where(ch[c].notna(), None).tolist() for c in
                 ["date", "current_target", "next_implied", "third_implied", "sixth_implied",
                  "next_meeting", "third_meeting", "sixth_meeting"]},

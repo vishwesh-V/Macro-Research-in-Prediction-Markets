@@ -116,11 +116,20 @@ code{font:12.5px var(--mono);background:var(--grid);padding:1px 5px;border-radiu
     <div class="chart" id="c-hist"></div>
   </section>
 
+  <section class="card" aria-labelledby="h-hair">
+    <div class="head">
+      <div><h2 id="h-hair">Every implied path at once</h2><p class="sub">The heavy line is the target in force. Each thin line starts from it on the first trading day of a month and runs through the implied rate for every reliably priced upcoming meeting. Where the lines bend away from the target, the market was wrong about what came next. Hover to pick out one path.</p></div>
+      <div class="legend" id="lg-hair"></div>
+    </div>
+    <div class="chart" id="c-hair"></div>
+  </section>
+
   <section class="card" aria-labelledby="h-meet">
     <div class="head">
       <div><h2 id="h-meet">Meeting explorer</h2><p class="sub">Full life of one meeting's ladder: the implied rate, and the probability of each outcome.</p></div>
       <label class="k" for="meet-sel" style="display:flex;gap:8px;align-items:center">Meeting <select id="meet-sel"></select></label>
     </div>
+    <p class="sub" id="meet-head" style="margin:0"></p>
     <div class="legend" id="lg-meet"></div>
     <div class="chart" id="c-meet"></div>
     <div class="legend" id="lg-dist"></div>
@@ -136,8 +145,9 @@ code{font:12.5px var(--mono);background:var(--grid);padding:1px 5px;border-radiu
   <section class="methods" aria-label="Method">
     <div><h3>From contracts to a rate</h3><p>Each contract pays $1 if the upper bound is above strike <i>k</i>. Its price is P(rate &gt; <i>k</i>). Differencing across the ladder gives the probability of each 25bp outcome, and the expected upper bound is the probability-weighted sum.</p></div>
     <div><h3>Pricing a contract each day</h3><p>Close bid/ask midpoint when the spread is 20¢ or less. Up to 40¢, the last trade clipped to the quote. Wider than that, the strike is dropped. Quotes carry forward on days with no candle. A weighted isotonic fit (tighter quotes weigh more) makes probabilities non-increasing in strike.</p></div>
-    <div><h3>Reliability</h3><p>A meeting-day is flagged unreliable when more than 10% of probability sits beyond the usable strikes (as in 2022, when hikes outran the ladder) or in gaps wider than 50bp between them. Those days are shaded here and left out of the history lines.</p></div>
-    <div><h3>Files</h3><p><code>data/implied_rate_daily.csv</code>, <code>constant_horizon.csv</code>, <code>candles_daily.csv</code>, <code>markets.csv</code>, <code>meeting_summary.csv</code>. Refresh with <code>fetch_kalshi_fed.py</code> then <code>build_series.py</code>.</p></div>
+    <div><h3>Effective rate basis</h3><p>Kalshi settles on the target's upper bound; fed funds futures settle on the effective rate (EFFR), which trades inside the range. The EFFR-basis figure adds the median EFFR minus upper-bound gap over the last 20 days, from FRED: about −17bp through 2024, about −12bp in 2026.</p></div>
+    <div><h3>Reliability</h3><p>A meeting-day is flagged unreliable when more than 10% of probability sits beyond the usable strikes (as in 2022, when hikes outran the ladder) or in gaps wider than 50bp between them. Those days are drawn as gray dashes in the explorer and left out of the history lines.</p></div>
+    <div><h3>Files</h3><p><code>data/implied_rate_daily.csv</code>, <code>constant_horizon.csv</code>, <code>candles_daily.csv</code>, <code>markets.csv</code>, <code>meeting_summary.csv</code>, <code>fred_effr.csv</code>. Refresh with <code>fetch_kalshi_fed.py</code> then <code>build_series.py</code>.</p></div>
   </section>
 </div>
 
@@ -150,7 +160,8 @@ const el = (tag, attrs = {}, parent) => { const e = document.createElementNS(NS,
 const t = d => Date.parse(d + "T12:00:00Z");
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const fmtD = ms => { const d = new Date(ms); return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`; };
-const fmtM = ms => { const d = new Date(ms); return `${MON[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`; };
+const fmtM = ms => { const d = new Date(ms); return `${MON[d.getUTCMonth()]} '${String(d.getUTCFullYear()).slice(2)}`; };
+const fmtDay = ms => { const d = new Date(ms); return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}`; };
 const pct = (v, n = 2) => v == null ? "–" : v.toFixed(n) + "%";
 const meetings = Object.values(DATA.meetings).sort((a, b) => a.meeting.localeCompare(b.meeting));
 const asof = DATA.asof, asofT = t(asof);
@@ -175,7 +186,7 @@ const lastIdx = next.d.lastIndexOf(asof) >= 0 ? next.d.lastIndexOf(asof) : next.
 const o = odds(next.keys, next.p[lastIdx], target.upper_bound);
 $("#strip").innerHTML = `
   <div><span class="k">Target upper bound</span><span class="v">${pct(target.upper_bound)}</span><span class="sub">Set ${fmtD(t(target.meeting_date))}</span></div>
-  <div><span class="k">Next meeting · ${fmtD(t(next.meeting))}</span><span class="v">${pct(next.mu[lastIdx])} <small>implied</small></span>
+  <div><span class="k">Next meeting · ${fmtD(t(next.meeting))}</span><span class="v">${pct(next.mu[lastIdx])} <small>implied · EFFR basis ${pct(next.mu[lastIdx] + DATA.effr_gap)}</small></span>
     <span class="odds">
       <span class="pill"><i style="background:var(--hike)"></i>Hike ${(o.hike*100).toFixed(0)}%</span>
       <span class="pill"><i style="background:var(--hold)"></i>Hold ${(o.hold*100).toFixed(0)}%</span>
@@ -187,7 +198,13 @@ function median(a){ a = [...a].sort((x,y)=>x-y); const m = a.length>>1; return a
 /* ---------- generic time-series chart ---------- */
 function niceStep(span, n) { const raw = span / n, p = 10 ** Math.floor(Math.log10(raw)); return [1, 2, 2.5, 5, 10].map(m => m * p).find(s => s >= raw); }
 function timeTicks(x0, x1, w) {
-  const months = (x1 - x0) / 2.63e9, want = Math.max(2, Math.floor(w / 90));
+  const days = (x1 - x0) / 864e5, want = Math.max(2, Math.floor(w / 90));
+  if (days < 75) {
+    const step = [1, 2, 3, 7, 14].find(s => days / s <= want) || 14, out = [];
+    for (let x = Math.ceil(x0 / 864e5) * 864e5 + 432e5; x <= x1; x += step * 864e5) out.push(x);
+    return { ticks: out, fmt: fmtDay };
+  }
+  const months = (x1 - x0) / 2.63e9;
   const step = [1, 2, 3, 6, 12, 24].find(s => months / s <= want) || 24;
   const d = new Date(x0); d.setUTCDate(1); d.setUTCMonth(Math.ceil(d.getUTCMonth() / step) * step);
   const out = []; while (+d <= x1) { if (+d >= x0) out.push(+d); d.setUTCMonth(d.getUTCMonth() + step); }
@@ -195,7 +212,7 @@ function timeTicks(x0, x1, w) {
 }
 function lineChart(host, { series, x0, x1, yPad = 0.15, height = 300, dots = false, shade = [], tipTitle = fmtD, markers = [] }) {
   host.innerHTML = "";
-  const W = host.clientWidth, H = height, m = { l: 44, r: 14, t: 10, b: 26 };
+  const W = Math.max(host.clientWidth, 300), H = height, m = { l: 44, r: 14, t: 10, b: 26 };
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img" }, host);
   let ymin = Infinity, ymax = -Infinity;
   series.forEach(s => s.pts.forEach(([x, y]) => { if (y != null && x >= x0 && x <= x1) { ymin = Math.min(ymin, y); ymax = Math.max(ymax, y); } }));
@@ -270,7 +287,7 @@ function drawPath() {
 $("#path-note").textContent = skipped.length ? `Not shown: ${skipped.join(", ")}. Most strikes on these ladders are quoted with spreads of 50¢ or more, so too much of the probability can't be placed.` : "";
 
 /* ---------- 2. history ---------- */
-const H = DATA.horizon, hx = H.date.map(t);
+const H = DATA.horizon, H_ = H, hx = H.date.map(t);
 const hSeries = [
   { key: "current_target", color: "--target", width: 1.5, label: () => "Target in force" },
   { key: "next_implied", color: "--s1", label: i => "Next mtg · " + fmtM(t(H.next_meeting[i])) },
@@ -289,10 +306,57 @@ function drawHist() {
 $("#range").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return;
   histYears = +b.dataset.y; $("#range").querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", x === b)); drawHist(); });
 
+/* ---------- 2b. hair chart ---------- */
+legend($("#lg-hair"), [{ color: "--target", label: "Target in force" }, { color: "--s1", label: "Implied path from each month (darker = more recent)" }]);
+function drawHair() {
+  const host = $("#c-hair"); host.innerHTML = "";
+  const W = Math.max(host.clientWidth, 300), H = 360, m = { l: 44, r: 14, t: 10, b: 26 };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, height: H, role: "img", "aria-label": "Implied rate paths from each month against the realized target" }, host);
+  const hairs = DATA.hairs.map(h => h.pts.map(([d, y]) => [t(d), y]));
+  const x0 = hx[0], x1 = Math.max(hx.at(-1), ...hairs.flat().map(p => p[0]));
+  let ymax = Math.max(...hairs.flat().map(p => p[1]), ...H_.current_target.filter(v => v != null)) + 0.3;
+  const X = x => m.l + (x - x0) / (x1 - x0) * (W - m.l - m.r), Y = y => m.t + (1 - y / ymax) * (H - m.t - m.b);
+  for (let v = 0; v <= ymax; v += 1) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: css("--grid") }, svg);
+    el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = v + "%";
+  }
+  const tt = timeTicks(x0, x1, W - m.l - m.r);
+  tt.ticks.forEach(x => el("text", { x: X(x), y: H - 6, "text-anchor": "middle" }, svg).textContent = tt.fmt(x));
+  el("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: css("--rule") }, svg);
+  const n = hairs.length, lo = css("--seq-lo"), hi = css("--seq-hi");
+  const paths = hairs.map((h, k) => el("path", { d: h.map(([x, y], i) => (i ? "L" : "M") + X(x).toFixed(1) + "," + Y(y).toFixed(1)).join(""),
+    fill: "none", stroke: mix(lo, hi, 0.35 + 0.65 * k / Math.max(1, n - 1)), "stroke-width": 1.2, "stroke-linejoin": "round", opacity: 0.9 }, svg));
+  let step = "", prev = null;
+  hx.forEach((x, i) => { const y = H_.current_target[i]; if (y == null) return;
+    step += prev == null ? `M${X(x).toFixed(1)},${Y(y).toFixed(1)}` : `H${X(x).toFixed(1)}V${Y(y).toFixed(1)}`; prev = y; });
+  el("path", { d: step, fill: "none", stroke: css("--target"), "stroke-width": 2.4 }, svg);
+  const hl = el("path", { fill: "none", stroke: css("--s2"), "stroke-width": 2.5, visibility: "hidden" }, svg);
+  const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" }, svg);
+  const move = ev => {
+    const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width, py = (ev.clientY - r.top) * H / r.height;
+    let best = Infinity, k = -1;
+    hairs.forEach((h, j) => h.forEach(([x, y], i) => { if (!i) return; const [xa, ya] = h[i - 1];
+      const ax = X(xa), ay = Y(ya), bx = X(x), by = Y(y), dx = bx - ax, dy = by - ay;
+      const u = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1)));
+      const d = Math.hypot(px - ax - u * dx, py - ay - u * dy); if (d < best) { best = d; k = j; } }));
+    if (k < 0 || best > 24) { tip.hidden = true; hl.setAttribute("visibility", "hidden"); return; }
+    hl.setAttribute("d", paths[k].getAttribute("d")); hl.setAttribute("visibility", "visible");
+    const h = DATA.hairs[k];
+    tip.innerHTML = `<b>Path priced on ${fmtD(t(h.d))}</b><div class="r"><span>Target then</span><span>${pct(h.pts[0][1])}</span></div>` +
+      h.pts.slice(1, 9).map(([d, y]) => `<div class="r"><span>Meeting ${fmtM(t(d))}</span><span>${pct(y)}</span></div>`).join("") +
+      (h.pts.length > 9 ? `<div class="r"><span>+ ${h.pts.length - 9} more</span><span></span></div>` : "");
+    tip.hidden = false; const hx2 = px * r.width / W;
+    tip.style.top = "8px"; tip.style.left = (hx2 + 14 + tip.offsetWidth > r.width ? hx2 - 14 - tip.offsetWidth : hx2 + 14) + "px";
+  };
+  hit.addEventListener("pointermove", move); hit.addEventListener("pointerdown", move);
+  hit.addEventListener("pointerleave", () => { tip.hidden = true; hl.setAttribute("visibility", "hidden"); });
+}
+
 /* ---------- 3. meeting explorer ---------- */
 const sel = $("#meet-sel");
 [...meetings].reverse().forEach(m => { const o = document.createElement("option"); o.value = m.title;
-  o.textContent = `${fmtM(t(m.meeting))} · ${m.title}`; sel.appendChild(o); });
+  o.textContent = `${fmtD(t(m.meeting))} · ${m.title}`; sel.appendChild(o); });
 sel.value = next.title;
 function mix(a, b, f) { const h = s => [1, 3, 5].map(i => parseInt(s.slice(i, i + 2), 16)); const A = h(a), B = h(b);
   return "#" + A.map((v, i) => Math.round(v + (B[i] - v) * f).toString(16).padStart(2, "0")).join(""); }
@@ -303,47 +367,60 @@ function drawMeet() {
   const m = DATA.meetings[sel.value], xs = m.d.map(t), x0 = xs[0], x1 = xs.at(-1) + 864e5;
   const real = realized.find(r => r.event_ticker === m.title);
   const shade = runs(m);
-  legend($("#lg-meet"), [{ color: "--s1", label: "Implied upper bound" }].concat(real ? [{ color: "--target", label: "Realized " + pct(real.upper_bound), kind: "dash" }] : []));
-  lineChart($("#c-meet"), { x0, x1, height: 220, shade, series: [
+  const nRel = m.rel.reduce((a, b) => a + b, 0);
+  // Gray covers unreliable days plus the reliable days bordering them, so the two lines join.
+  const grayY = m.mu.map((v, i) => !m.rel[i] || !m.rel[i - 1] || !m.rel[i + 1] ? v : null);
+  legend($("#lg-meet"), (nRel ? [{ color: "--s1", label: "Implied upper bound" }] : [])
+    .concat(nRel < m.d.length ? [{ color: "--ink-3", label: "Unreliable days", kind: "dash" }] : [])
+    .concat(real ? [{ color: "--target", label: "Realized " + pct(real.upper_bound), kind: "dash" }] : []));
+  lineChart($("#c-meet"), { x0, x1, height: 220, series: [
     ...(real ? [{ pts: [[x0, real.upper_bound], [x1, real.upper_bound]], color: "--target", width: 1.5, dash: "4 4", label: () => "Realized" }] : []),
-    { pts: xs.map((x, i) => [x, m.mu[i]]), color: "--s1", label: x => m.rel[xs.indexOf(x)] ? "Implied" : "Implied (unreliable)" },
+    { pts: xs.map((x, i) => [x, grayY[i]]), color: "--ink-3", width: 1.25, dash: "3 3", label: () => "Unreliable" },
+    { pts: xs.map((x, i) => [x, m.rel[i] ? m.mu[i] : null]), color: "--s1", label: () => "Implied" },
   ]});
-  drawDist(m, xs, x0, x1, shade);
+  drawDist(m, xs, x0, x1);
   const tot = m.vol.reduce((a, b) => a + b, 0);
-  $("#meet-note").textContent = `${m.keys.length - 1} strikes · ${Math.round(tot).toLocaleString()} contracts traded · ${m.d.length} days` + (shade.length ? " · Shaded periods are flagged unreliable: too much probability sits outside or between the usable strikes, so the implied rate there is approximate." : "");
+  $("#meet-head").textContent = `Meeting on ${fmtD(t(m.meeting))}. Listed ${fmtD(xs[0])}; the x-axis is the trading date.`;
+  $("#meet-note").textContent = `${m.keys.length} outcomes · ${Math.round(tot).toLocaleString()} contracts traded · ${m.d.length} trading days, ${nRel} reliable.` +
+    (nRel < m.d.length ? " Unreliable days: too much probability sits outside or between the usable strikes, so the implied rate there is approximate." : "");
 }
-function drawDist(m, xs, x0, x1, shade) {
+function drawDist(m, xs, x0, x1) {
   const host = $("#c-dist"); host.innerHTML = "";
-  // Fold outcomes that never reach 4% into the nearest shown bucket, keeping the order.
-  const peak = m.keys.map((_, j) => Math.max(...m.p.map(r => r[j])));
-  let lo = peak.findIndex(v => v >= 0.04), hi = peak.length - 1 - [...peak].reverse().findIndex(v => v >= 0.04);
+  const relIdx = m.rel.map((r, i) => r ? i : -1).filter(i => i >= 0);
+  if (!relIdx.length) { $("#lg-dist").innerHTML = ""; host.innerHTML = `<p class="note">No reliable days yet, so no outcome probabilities are shown. Most strikes on this ladder are quoted too wide to price.</p>`; return; }
+  // Fold outcomes that never reach 10% (on reliable days) into the nearest shown bucket.
+  const peak = m.keys.map((_, j) => Math.max(...relIdx.map(i => m.p[i][j])));
+  let lo = peak.findIndex(v => v >= 0.10), hi = peak.length - 1 - [...peak].reverse().findIndex(v => v >= 0.10);
   if (lo < 0) { lo = 0; hi = peak.length - 1; }
   const vals = m.keys.map(k => +k.split("_").at(-1));
   const buckets = [];
-  for (let j = lo; j <= hi; j++) buckets.push({ j, label: (j === lo && lo > 0 ? "≤" : j === hi && hi < m.keys.length - 1 ? "≥" : "") + vals[j].toFixed(2) + "%" });
+  // The lowest bucket always holds "at or below", the highest "at or above".
+  for (let j = lo; j <= hi; j++) buckets.push({ j, label: (j === lo ? "≤" : j === hi ? "≥" : "") + vals[j].toFixed(2) + "%" });
   const P = m.p.map(r => buckets.map((b, bi) => bi === 0 ? r.slice(0, b.j + 1).reduce((a, c) => a + c, 0) : bi === buckets.length - 1 ? r.slice(b.j).reduce((a, c) => a + c, 0) : r[b.j]));
   const n = buckets.length, colors = buckets.map((_, i) => mix(css("--seq-lo"), css("--seq-hi"), n === 1 ? 1 : i / (n - 1)));
   $("#lg-dist").innerHTML = `<span class="k" style="margin-right:4px">Outcome probability</span>` + buckets.map((b, i) => `<span><i class="sw dot" style="background:${colors[i]}"></i>${b.label}</span>`).join("");
-  const W = host.clientWidth, Hh = 200, mg = { l: 44, r: 14, t: 6, b: 26 };
+  const W = Math.max(host.clientWidth, 300), Hh = 200, mg = { l: 44, r: 14, t: 6, b: 26 };
   const svg = el("svg", { viewBox: `0 0 ${W} ${Hh}`, height: Hh, role: "img", "aria-label": "Stacked outcome probabilities" }, host);
   const X = x => mg.l + (x - x0) / (x1 - x0) * (W - mg.l - mg.r), Y = v => mg.t + (1 - v) * (Hh - mg.t - mg.b);
   [0, .25, .5, .75, 1].forEach(v => el("text", { x: mg.l - 8, y: Y(v) + 4, "text-anchor": "end" }, svg).textContent = (v * 100) + "%");
   const tt = timeTicks(x0, x1, W - mg.l - mg.r); tt.ticks.forEach(x => el("text", { x: X(x), y: Hh - 6, "text-anchor": "middle" }, svg).textContent = tt.fmt(x));
   const cum = P.map(r => { let s = 0; return r.map(v => (s += v)); });
-  const step = (W - mg.l - mg.r) / Math.max(1, (x1 - x0) / 864e5);
-  for (let b = 0; b < n; b++) {
-    let top = "", bot = "";
-    xs.forEach((x, i) => { top += (i ? "L" : "M") + X(x).toFixed(1) + "," + Y(cum[i][b]).toFixed(1); });
-    for (let i = xs.length - 1; i >= 0; i--) bot += "L" + X(xs[i]).toFixed(1) + "," + Y(b ? cum[i][b - 1] : 0).toFixed(1);
-    el("path", { d: top + bot + "Z", fill: colors[b], stroke: css("--surface"), "stroke-width": 0.5 }, svg);
-  }
-  shade.forEach(([a, b2]) => el("rect", { x: X(a), y: mg.t, width: Math.max(1, X(b2) - X(a)), height: Hh - mg.t - mg.b, fill: css("--surface"), opacity: .35 }, svg));
+  // Draw each run of consecutive reliable days as its own stacked block.
+  const segs = []; relIdx.forEach((i, k) => (k && relIdx[k - 1] === i - 1 ? segs.at(-1).push(i) : segs.push([i])));
+  segs.forEach(seg => { const ix = seg.length === 1 ? [seg[0], seg[0]] : seg;
+    const xa = i => X(xs[i]) + (seg.length === 1 && i === ix[1] ? Math.max(1.5, (W - mg.l - mg.r) / ((x1 - x0) / 864e5)) : 0);
+    for (let b = 0; b < n; b++) {
+      let top = "", bot = "";
+      ix.forEach((i, k) => { top += (k ? "L" : "M") + xa(i).toFixed(1) + "," + Y(cum[i][b]).toFixed(1); });
+      for (let k = ix.length - 1; k >= 0; k--) bot += "L" + xa(ix[k]).toFixed(1) + "," + Y(b ? cum[ix[k]][b - 1] : 0).toFixed(1);
+      el("path", { d: top + bot + "Z", fill: colors[b], stroke: css("--surface"), "stroke-width": 0.5 }, svg);
+    } });
   const cross = el("line", { y1: mg.t, y2: Hh - mg.b, stroke: css("--ink"), visibility: "hidden" }, svg);
   const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
   const hit = el("rect", { x: mg.l, y: mg.t, width: W - mg.l - mg.r, height: Hh - mg.t - mg.b, fill: "transparent" }, svg);
   const move = ev => { const r = svg.getBoundingClientRect(), px = (ev.clientX - r.left) * W / r.width;
     const xv = x0 + (px - mg.l) / (W - mg.l - mg.r) * (x1 - x0);
-    let i = 0, best = Infinity; xs.forEach((x, k) => { const d = Math.abs(x - xv); if (d < best) { best = d; i = k; } });
+    let i = relIdx[0], best = Infinity; relIdx.forEach(k => { const d = Math.abs(xs[k] - xv); if (d < best) { best = d; i = k; } });
     cross.setAttribute("x1", X(xs[i])); cross.setAttribute("x2", X(xs[i])); cross.setAttribute("visibility", "visible");
     tip.innerHTML = `<b>${fmtD(xs[i])} · implied ${pct(m.mu[i])}</b>` + buckets.map((bk, k) => ({ bk, k })).reverse().map(({ bk, k }) =>
       `<div class="r"><span><i class="sw dot" style="background:${colors[k]}"></i>${bk.label}</span><span>${(P[i][k] * 100).toFixed(1)}%</span></div>`).join("");
@@ -364,7 +441,7 @@ const tb = $("#tbl tbody");
   tb.appendChild(tr);
 });
 
-function drawAll() { drawPath(); drawHist(); drawMeet(); }
+function drawAll() { drawPath(); drawHist(); drawHair(); drawMeet(); }
 drawAll();
 let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(drawAll, 120); });
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
