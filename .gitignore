@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 .env
 CLAUDE.md   
+# Downloaded data (regenerate with 00_fetch_data_kalshi.py)
+data/*.parquet
+data/*.log
