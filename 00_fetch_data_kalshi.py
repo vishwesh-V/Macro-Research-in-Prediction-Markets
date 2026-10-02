@@ -5,8 +5,8 @@
 """Download Kalshi trades and 1-minute candles for a set of series into ./data.
 
 Outputs:
-  data/kalshi_markets.parquet  one row per contract: event, strike, open/close
-                               times, status, settlement result
+  data/kalshi_markets.parquet  one row per contract: event, outcome bucket,
+                               open/close times, status, settlement result
   data/kalshi_trades.parquet   every trade: price, size, taker side, block flag
   data/kalshi_candles_1m.parquet
                                one row per contract-minute in which the quote or
@@ -14,7 +14,7 @@ Outputs:
                                price OHLC, volume, open interest
 
 Run as a script to download:
-  uv run --script 00_fetch_data_kalshi.py [-- --series KXFED,KXFEDDECISION --full]
+  uv run --script 00_fetch_data_kalshi.py [-- --series KXFEDDECISION,KXFED --full]
 Open in marimo to inspect; the download only starts when the button is clicked:
   uvx marimo edit --sandbox 00_fetch_data_kalshi.py
 """
@@ -35,7 +35,12 @@ with app.setup:
     import requests
 
     BASE = "https://api.elections.kalshi.com/trade-api/v2"
-    SERIES = ["KXFED"]  # Fed funds target ladder, one event per FOMC meeting
+    # Per-meeting decision buckets (cut >25 / cut 25 / hold / hike 25 / hike >25),
+    # one event per FOMC meeting since May 2023. Far more liquid than the KXFED
+    # rate-level ladder for the next meetings.
+    SERIES = ["KXFEDDECISION"]
+    # Contract descriptors attached to every trade and candle row.
+    KEYS = ["event_ticker", "bucket", "outcome", "strike"]
     OUT = Path(__file__).resolve().parent / "data"
     MARKETS_FILE = OUT / "kalshi_markets.parquet"
     TRADES_FILE = OUT / "kalshi_trades.parquet"
@@ -61,13 +66,15 @@ def _():
 
     | File | Contents |
     |---|---|
-    | `kalshi_markets.parquet` | One row per contract: event, strike, open/close times, status, settlement result |
+    | `kalshi_markets.parquet` | One row per contract: event, outcome bucket, open/close times, status, settlement result |
     | `kalshi_trades.parquet` | Every trade: price, size, taker side, block flag |
     | `kalshi_candles_1m.parquet` | One row per contract-minute where the quote or a trade changed: best YES bid/ask OHLC, trade price OHLC, volume, open interest |
 
     - **The candle file is sparse:** Kalshi only emits a candle when something changed, so forward-fill the quote for a regular grid. Sizes at the best bid/ask are not available historically.
     - **Two endpoints:** markets settled before Kalshi's historical cutoff are only on `/historical/*`, and trades filled before the cutoff are only on `/historical/trades`, even for contracts that are still open. Both are queried.
-    - **Incremental:** re-running skips settled contracts already stored and resumes open ones from their last timestamp. The first full run of `KXFED` takes about 3 hours: one request per 5,000 minutes per contract (~43,000 requests), and Kalshi's public tier allows ~4.5 requests/s.
+    - **Incremental:** re-running skips settled contracts already stored and resumes open ones from their last timestamp. Each contract costs one request per 5,000 minutes of its life, and Kalshi's public tier allows ~4.5 requests/s: about an hour for `KXFEDDECISION`, about 3 hours for the `KXFED` ladder.
+    - **Known data issue:** Kalshi's own volume for `KXFEDDECISION-25JUN-H25` is 34,000 contracts higher than the trades its API serves: the 2025-05-15 23:32 UTC candle shows 68,000 contracts against four trades totalling 34,000. All other settled contracts match within 1%.
+    - **Contract labels:** `bucket` is the ticker suffix (`H25`, `C26`, `TH50`, …; codes change over time) and `outcome` is Kalshi's label (`Hike 25bps`, `Cut >25bps`, …). `strike` is only set for rate-level ladders such as `KXFED` (`-T4.00` → 4.00).
     """)
     return
 
@@ -140,22 +147,28 @@ def fetch_markets(series):
             et = e["event_ticker"]
             for historical, path in ((False, "/markets"), (True, "/historical/markets")):
                 for m in paginate(path, "markets", {"event_ticker": et}):
-                    strike = m.get("floor_strike")
-                    if strike is None and "-T" in m["ticker"]:  # legacy FED-* tickers
-                        strike = m["ticker"].rsplit("-T", 1)[-1]
+                    bucket = m["ticker"].rsplit("-", 1)[-1]
+                    # Rate-level ladders encode the strike as T<level>; decision
+                    # buckets like TH50 ("hike >50bps") have none.
+                    try:
+                        strike = float(bucket[1:]) if bucket.startswith("T") else None
+                    except ValueError:
+                        strike = None
                     rows.append({
                         "ticker": m["ticker"], "event_ticker": et, "series_ticker": s,
                         "event_title": e.get("title"), "title": m.get("title"),
-                        "strike": num(strike), "status": m.get("status"),
+                        "bucket": bucket, "outcome": m.get("yes_sub_title"),
+                        "strike": strike, "status": m.get("status"),
                         "result": m.get("result") or None,
                         "open_time": m["open_time"], "close_time": m["close_time"],
                         "volume": num(m.get("volume_fp", m.get("volume"))),
                         "historical": historical,
                     })
     df = pd.DataFrame(rows).drop_duplicates("ticker", keep="last")
+    df["strike"] = df.strike.astype(float)  # all-None for decision series otherwise
     for c in ("open_time", "close_time"):
         df[c] = pd.to_datetime(df[c], utc=True)
-    return df.sort_values(["series_ticker", "close_time", "strike"]).reset_index(drop=True)
+    return df.sort_values(["series_ticker", "close_time", "ticker"]).reset_index(drop=True)
 
 
 @app.function
@@ -207,16 +220,16 @@ def load(path):
 @app.function
 def tidy_trades(df, markets):
     df = df.drop_duplicates("trade_id", keep="last")
-    df = df.drop(columns=["event_ticker", "strike"], errors="ignore") \
-        .merge(markets[["ticker", "event_ticker", "strike"]], on="ticker", how="left")
+    df = df.drop(columns=KEYS, errors="ignore") \
+        .merge(markets[["ticker", *KEYS]], on="ticker", how="left")
     return df.sort_values(["ticker", "created_time"]).reset_index(drop=True)
 
 
 @app.function
 def tidy_candles(df, markets):
     df = df.drop_duplicates(["ticker", "ts"], keep="last")
-    df = df.drop(columns=["event_ticker", "strike"], errors="ignore") \
-        .merge(markets[["ticker", "event_ticker", "strike"]], on="ticker", how="left")
+    df = df.drop(columns=KEYS, errors="ignore") \
+        .merge(markets[["ticker", *KEYS]], on="ticker", how="left")
     return df.sort_values(["ticker", "ts"]).reset_index(drop=True)
 
 
@@ -224,6 +237,11 @@ def tidy_candles(df, markets):
 def download(series, full=False):
     OUT.mkdir(exist_ok=True)
     markets = fetch_markets(series)
+    # Keep contracts of other series already stored, so one file covers every run.
+    old_m = pd.DataFrame() if full else load(MARKETS_FILE)
+    if len(old_m):
+        old_m = old_m[~old_m.series_ticker.isin(series)]
+        markets = pd.concat([old_m, markets], ignore_index=True)
     markets.to_parquet(MARKETS_FILE, index=False)
     print(f"{len(markets)} contracts")
 
