@@ -1,0 +1,230 @@
+{
+  "version": "1",
+  "metadata": {
+    "marimo_version": "0.25.0",
+    "script_metadata_hash": "9fa8b2c34adbb189722a6080dc197f98"
+  },
+  "cells": [
+    {
+      "id": "setup",
+      "code_hash": "f4475fee3334115561cc54626dfbfbcb",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Hbol",
+      "code_hash": "0165e578bf35af5ec5e2cd465789b4e5",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h1 id=\"00-fetch-kalshi-data\">00 \u00b7 Fetch Kalshi data</h1>\n<span class=\"paragraph\">Downloads every trade and every 1-minute candle for the series below into <code>data/</code>.</span>\n<table>\n<thead>\n<tr>\n<th>File</th>\n<th>Contents</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><code>kalshi_markets.parquet</code></td>\n<td>One row per contract: event, outcome bucket, open/close times, status, settlement result</td>\n</tr>\n<tr>\n<td><code>kalshi_trades.parquet</code></td>\n<td>Every trade: price, size, taker side, block flag</td>\n</tr>\n<tr>\n<td><code>kalshi_candles_1m.parquet</code></td>\n<td>One row per contract-minute where the quote or a trade changed: best YES bid/ask OHLC, trade price OHLC, volume, open interest</td>\n</tr>\n</tbody>\n</table>\n<ul>\n<li><strong>The candle file is sparse:</strong> Kalshi only emits a candle when something changed, so forward-fill the quote for a regular grid. Sizes at the best bid/ask are not available historically.</li>\n<li><strong>Two endpoints:</strong> markets settled before Kalshi's historical cutoff are only on <code>/historical/*</code>, and trades filled before the cutoff are only on <code>/historical/trades</code>, even for contracts that are still open. Both are queried.</li>\n<li><strong>Incremental:</strong> re-running skips settled contracts already stored and resumes open ones from their last timestamp. Each contract costs one request per 5,000 minutes of its life, and Kalshi's public tier allows ~4.5 requests/s: about an hour for <code>KXFEDDECISION</code>, about 3 hours for the <code>KXFED</code> ladder.</li>\n<li><strong>Known data issue:</strong> Kalshi's own volume for <code>KXFEDDECISION-25JUN-H25</code> is 34,000 contracts higher than the trades its API serves: the 2025-05-15 23:32 UTC candle shows 68,000 contracts against four trades totalling 34,000. All other settled contracts match within 1%.</li>\n<li><strong>Contract labels:</strong> <code>bucket</code> is the ticker suffix (<code>H25</code>, <code>C26</code>, <code>TH50</code>, \u2026; codes change over time) and <code>outcome</code> is Kalshi's label (<code>Hike 25bps</code>, <code>Cut &gt;25bps</code>, \u2026). <code>strike</code> is only set for rate-level ladders such as <code>KXFED</code> (<code>-T4.00</code> \u2192 4.00).</li>\n</ul></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "MJUe",
+      "code_hash": "28081c7ef27efdc456d6229e1e239feb",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "vblA",
+      "code_hash": "fb75810acbc213e25305aeed543433db",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "bkHC",
+      "code_hash": "9e66799c39904a76203eea65a3aa46ed",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "lEQa",
+      "code_hash": "b8ebde232a1786fbada1684b94b363f6",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "PKri",
+      "code_hash": "69ff9c05a7af5af6dac8f6877273f660",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Xref",
+      "code_hash": "a7cbf0c90b2b3f6d59fcb9ed58e1fed9",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "SFPL",
+      "code_hash": "483ff938166db0c8b02b5ab318207f15",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "BYtC",
+      "code_hash": "1b7a5b14eb1448501e69e6038135b11d",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "RGSE",
+      "code_hash": "26d8f8eff41bea5d718db3a9f5cee810",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Kclp",
+      "code_hash": "d04b5379ba1cc8fda4b8bc98d28d7eaa",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "emfo",
+      "code_hash": "24a38c7e5d5b3107c16c13a3554fb669",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Hstk",
+      "code_hash": "438f226128e34a83ecfcda9c8bfdd617",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "nWHF",
+      "code_hash": "1ad455016e34351e1aa4861c4f97d41c",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: row;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><marimo-ui-element object-id='nWHF-0' random-id='43c5e10d-edb2-f598-7927-fa8571482d1a'><marimo-text data-initial-value='&quot;KXFEDDECISION&quot;' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eSeries (comma-separated)&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-placeholder='&quot;&quot;' data-kind='&quot;text&quot;' data-full-width='false' data-disabled='false' data-debounce='true'></marimo-text></marimo-ui-element><marimo-ui-element object-id='nWHF-1' random-id='1206fcae-74d4-40d6-8ad1-60ee386b77c8'><marimo-checkbox data-initial-value='false' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eIgnore existing files and re-download&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-disabled='false'></marimo-checkbox></marimo-ui-element><marimo-ui-element object-id='nWHF-2' random-id='e6ae6e6a-9e66-c471-74e8-d9a4e9d33f14'><marimo-button data-initial-value='0' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eRun download&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-kind='&quot;neutral&quot;' data-disabled='false' data-full-width='false'></marimo-button></marimo-ui-element></div>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "iLit",
+      "code_hash": "62693fc70825e638e37c5c23d33d313b",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\">Click <strong>Run download</strong> to fetch. Existing files are shown below.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "ZHCJ",
+      "code_hash": "6d145e0bba08a40536190b96f095fcd7",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\"><strong>kalshi_markets.parquet</strong>: 195 rows</span></span><marimo-ui-element object-id='ZHCJ-0' random-id='99220f55-3463-4141-074e-b3f8493f3f14'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY-C25&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY&#92;&quot;,&#92;&quot;series_ticker&#92;&quot;:&#92;&quot;KXFEDDECISION&#92;&quot;,&#92;&quot;event_title&#92;&quot;:&#92;&quot;Fed meeting in May 2023?&#92;&quot;,&#92;&quot;title&#92;&quot;:&#92;&quot;Will the Federal Reserve Cut rates by 25 at their May 2023 meeting?&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C25&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut 25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN,&#92;&quot;status&#92;&quot;:&#92;&quot;finalized&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;no&#92;&quot;,&#92;&quot;open_time&#92;&quot;:&#92;&quot;2023-04-07 14:00:00+00:00&#92;&quot;,&#92;&quot;close_time&#92;&quot;:&#92;&quot;2023-05-03 17:55:00+00:00&#92;&quot;,&#92;&quot;volume&#92;&quot;:3459.0,&#92;&quot;historical&#92;&quot;:true},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY-H0&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY&#92;&quot;,&#92;&quot;series_ticker&#92;&quot;:&#92;&quot;KXFEDDECISION&#92;&quot;,&#92;&quot;event_title&#92;&quot;:&#92;&quot;Fed meeting in May 2023?&#92;&quot;,&#92;&quot;title&#92;&quot;:&#92;&quot;Will the Federal Reserve Hike rates by 0 at their May 2023 meeting?&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;H0&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;No change&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN,&#92;&quot;status&#92;&quot;:&#92;&quot;finalized&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;no&#92;&quot;,&#92;&quot;open_time&#92;&quot;:&#92;&quot;2023-04-07 14:00:00+00:00&#92;&quot;,&#92;&quot;close_time&#92;&quot;:&#92;&quot;2023-05-03 17:55:00+00:00&#92;&quot;,&#92;&quot;volume&#92;&quot;:138918.0,&#92;&quot;historical&#92;&quot;:true},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY-H25&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY&#92;&quot;,&#92;&quot;series_ticker&#92;&quot;:&#92;&quot;KXFEDDECISION&#92;&quot;,&#92;&quot;event_title&#92;&quot;:&#92;&quot;Fed meeting in May 2023?&#92;&quot;,&#92;&quot;title&#92;&quot;:&#92;&quot;Will the Federal Reserve Hike rates by 25 at their May 2023 meeting?&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;H25&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Hike 25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN,&#92;&quot;status&#92;&quot;:&#92;&quot;finalized&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;yes&#92;&quot;,&#92;&quot;open_time&#92;&quot;:&#92;&quot;2023-04-07 14:00:00+00:00&#92;&quot;,&#92;&quot;close_time&#92;&quot;:&#92;&quot;2023-05-03 17:55:00+00:00&#92;&quot;,&#92;&quot;volume&#92;&quot;:178672.0,&#92;&quot;historical&#92;&quot;:true},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY-H50&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY&#92;&quot;,&#92;&quot;series_ticker&#92;&quot;:&#92;&quot;KXFEDDECISION&#92;&quot;,&#92;&quot;event_title&#92;&quot;:&#92;&quot;Fed meeting in May 2023?&#92;&quot;,&#92;&quot;title&#92;&quot;:&#92;&quot;Will the Federal Reserve Hike rates by 50 at their May 2023 meeting?&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;H50&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Hike 50bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN,&#92;&quot;status&#92;&quot;:&#92;&quot;finalized&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;no&#92;&quot;,&#92;&quot;open_time&#92;&quot;:&#92;&quot;2023-04-07 14:00:00+00:00&#92;&quot;,&#92;&quot;close_time&#92;&quot;:&#92;&quot;2023-05-03 17:55:00+00:00&#92;&quot;,&#92;&quot;volume&#92;&quot;:10009.0,&#92;&quot;historical&#92;&quot;:true},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY-TC25&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23MAY&#92;&quot;,&#92;&quot;series_ticker&#92;&quot;:&#92;&quot;KXFEDDECISION&#92;&quot;,&#92;&quot;event_title&#92;&quot;:&#92;&quot;Fed meeting in May 2023?&#92;&quot;,&#92;&quot;title&#92;&quot;:&#92;&quot;Will the Federal Reserve Cut rates by &#92;u003e25bps at their May 2023 meeting?&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;TC25&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN,&#92;&quot;status&#92;&quot;:&#92;&quot;finalized&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;no&#92;&quot;,&#92;&quot;open_time&#92;&quot;:&#92;&quot;2023-04-07 14:00:00+00:00&#92;&quot;,&#92;&quot;close_time&#92;&quot;:&#92;&quot;2023-05-03 17:55:00+00:00&#92;&quot;,&#92;&quot;volume&#92;&quot;:1199.0,&#92;&quot;historical&#92;&quot;:true}]&quot;' data-total-rows='5' data-total-columns='14' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;event_ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;series_ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;event_title&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;title&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;bucket&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;outcome&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;strike&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;status&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;result&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;open_time&quot;,[&quot;datetime&quot;,&quot;datetime64[us, UTC]&quot;]],[&quot;close_time&quot;,[&quot;datetime&quot;,&quot;datetime64[us, UTC]&quot;]],[&quot;volume&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;historical&quot;,[&quot;boolean&quot;,&quot;bool&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element></div><div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\"><strong>kalshi_trades.parquet</strong>: 763,875 rows</span></span><marimo-ui-element object-id='ZHCJ-1' random-id='b8d8058f-f297-affc-f077-16e7d629c281'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;created_time&#92;&quot;:&#92;&quot;2023-11-01 21:43:22.908535+00:00&#92;&quot;,&#92;&quot;yes_price&#92;&quot;:0.03,&#92;&quot;no_price&#92;&quot;:0.97,&#92;&quot;count&#92;&quot;:10.0,&#92;&quot;taker_side&#92;&quot;:&#92;&quot;yes&#92;&quot;,&#92;&quot;is_block_trade&#92;&quot;:false,&#92;&quot;trade_id&#92;&quot;:&#92;&quot;cca970ab-a40d-4de3-81e1-ddcac0412c1a&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;created_time&#92;&quot;:&#92;&quot;2023-11-03 13:31:30.974211+00:00&#92;&quot;,&#92;&quot;yes_price&#92;&quot;:0.03,&#92;&quot;no_price&#92;&quot;:0.97,&#92;&quot;count&#92;&quot;:990.0,&#92;&quot;taker_side&#92;&quot;:&#92;&quot;yes&#92;&quot;,&#92;&quot;is_block_trade&#92;&quot;:false,&#92;&quot;trade_id&#92;&quot;:&#92;&quot;2a284b9b-cd5a-452f-b1cd-b40563314444&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;created_time&#92;&quot;:&#92;&quot;2023-11-03 13:32:56.236171+00:00&#92;&quot;,&#92;&quot;yes_price&#92;&quot;:0.03,&#92;&quot;no_price&#92;&quot;:0.97,&#92;&quot;count&#92;&quot;:210.0,&#92;&quot;taker_side&#92;&quot;:&#92;&quot;no&#92;&quot;,&#92;&quot;is_block_trade&#92;&quot;:false,&#92;&quot;trade_id&#92;&quot;:&#92;&quot;b0822129-1eb4-430b-92bd-c7b60d7c45da&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;created_time&#92;&quot;:&#92;&quot;2023-11-29 02:07:38.617340+00:00&#92;&quot;,&#92;&quot;yes_price&#92;&quot;:0.01,&#92;&quot;no_price&#92;&quot;:0.99,&#92;&quot;count&#92;&quot;:467.0,&#92;&quot;taker_side&#92;&quot;:&#92;&quot;yes&#92;&quot;,&#92;&quot;is_block_trade&#92;&quot;:false,&#92;&quot;trade_id&#92;&quot;:&#92;&quot;0171c1ec-9206-41c1-acd8-02828e2cb79a&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;created_time&#92;&quot;:&#92;&quot;2023-12-01 14:42:28.557188+00:00&#92;&quot;,&#92;&quot;yes_price&#92;&quot;:0.01,&#92;&quot;no_price&#92;&quot;:0.99,&#92;&quot;count&#92;&quot;:93.0,&#92;&quot;taker_side&#92;&quot;:&#92;&quot;yes&#92;&quot;,&#92;&quot;is_block_trade&#92;&quot;:false,&#92;&quot;trade_id&#92;&quot;:&#92;&quot;9870d851-0b01-4693-a040-77d076d32e32&#92;&quot;,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN}]&quot;' data-total-rows='5' data-total-columns='12' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;created_time&quot;,[&quot;datetime&quot;,&quot;datetime64[us, UTC]&quot;]],[&quot;yes_price&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;no_price&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;count&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;taker_side&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;is_block_trade&quot;,[&quot;boolean&quot;,&quot;bool&quot;]],[&quot;trade_id&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;event_ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;bucket&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;outcome&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;strike&quot;,[&quot;number&quot;,&quot;float64&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element></div><div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><span class=\"markdown prose dark:prose-invert contents\"><span class=\"paragraph\"><strong>kalshi_candles_1m.parquet</strong>: 3,115,940 rows</span></span><marimo-ui-element object-id='ZHCJ-2' random-id='8a6a73e0-edc1-7bb9-6e20-3824092b4693'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;ts&#92;&quot;:&#92;&quot;2023-11-01 19:31:00+00:00&#92;&quot;,&#92;&quot;bid_open&#92;&quot;:0.0,&#92;&quot;bid_high&#92;&quot;:0.0,&#92;&quot;bid_low&#92;&quot;:0.0,&#92;&quot;bid_close&#92;&quot;:0.0,&#92;&quot;ask_open&#92;&quot;:0.99,&#92;&quot;ask_high&#92;&quot;:0.99,&#92;&quot;ask_low&#92;&quot;:0.99,&#92;&quot;ask_close&#92;&quot;:0.99,&#92;&quot;price_open&#92;&quot;:NaN,&#92;&quot;price_high&#92;&quot;:NaN,&#92;&quot;price_low&#92;&quot;:NaN,&#92;&quot;price_close&#92;&quot;:NaN,&#92;&quot;price_mean&#92;&quot;:NaN,&#92;&quot;volume&#92;&quot;:0.0,&#92;&quot;open_interest&#92;&quot;:0.0,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;ts&#92;&quot;:&#92;&quot;2023-11-01 20:02:00+00:00&#92;&quot;,&#92;&quot;bid_open&#92;&quot;:0.0,&#92;&quot;bid_high&#92;&quot;:0.0,&#92;&quot;bid_low&#92;&quot;:0.0,&#92;&quot;bid_close&#92;&quot;:0.0,&#92;&quot;ask_open&#92;&quot;:0.99,&#92;&quot;ask_high&#92;&quot;:0.99,&#92;&quot;ask_low&#92;&quot;:0.98,&#92;&quot;ask_close&#92;&quot;:0.98,&#92;&quot;price_open&#92;&quot;:NaN,&#92;&quot;price_high&#92;&quot;:NaN,&#92;&quot;price_low&#92;&quot;:NaN,&#92;&quot;price_close&#92;&quot;:NaN,&#92;&quot;price_mean&#92;&quot;:NaN,&#92;&quot;volume&#92;&quot;:0.0,&#92;&quot;open_interest&#92;&quot;:0.0,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;ts&#92;&quot;:&#92;&quot;2023-11-01 20:52:00+00:00&#92;&quot;,&#92;&quot;bid_open&#92;&quot;:0.0,&#92;&quot;bid_high&#92;&quot;:0.0,&#92;&quot;bid_low&#92;&quot;:0.0,&#92;&quot;bid_close&#92;&quot;:0.0,&#92;&quot;ask_open&#92;&quot;:0.98,&#92;&quot;ask_high&#92;&quot;:0.99,&#92;&quot;ask_low&#92;&quot;:0.98,&#92;&quot;ask_close&#92;&quot;:0.98,&#92;&quot;price_open&#92;&quot;:NaN,&#92;&quot;price_high&#92;&quot;:NaN,&#92;&quot;price_low&#92;&quot;:NaN,&#92;&quot;price_close&#92;&quot;:NaN,&#92;&quot;price_mean&#92;&quot;:NaN,&#92;&quot;volume&#92;&quot;:0.0,&#92;&quot;open_interest&#92;&quot;:0.0,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;ts&#92;&quot;:&#92;&quot;2023-11-01 21:29:00+00:00&#92;&quot;,&#92;&quot;bid_open&#92;&quot;:0.0,&#92;&quot;bid_high&#92;&quot;:0.0,&#92;&quot;bid_low&#92;&quot;:0.0,&#92;&quot;bid_close&#92;&quot;:0.0,&#92;&quot;ask_open&#92;&quot;:0.98,&#92;&quot;ask_high&#92;&quot;:0.98,&#92;&quot;ask_low&#92;&quot;:0.03,&#92;&quot;ask_close&#92;&quot;:0.03,&#92;&quot;price_open&#92;&quot;:NaN,&#92;&quot;price_high&#92;&quot;:NaN,&#92;&quot;price_low&#92;&quot;:NaN,&#92;&quot;price_close&#92;&quot;:NaN,&#92;&quot;price_mean&#92;&quot;:NaN,&#92;&quot;volume&#92;&quot;:0.0,&#92;&quot;open_interest&#92;&quot;:0.0,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN},{&#92;&quot;ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC-C24&#92;&quot;,&#92;&quot;ts&#92;&quot;:&#92;&quot;2023-11-01 21:44:00+00:00&#92;&quot;,&#92;&quot;bid_open&#92;&quot;:0.0,&#92;&quot;bid_high&#92;&quot;:0.0,&#92;&quot;bid_low&#92;&quot;:0.0,&#92;&quot;bid_close&#92;&quot;:0.0,&#92;&quot;ask_open&#92;&quot;:0.03,&#92;&quot;ask_high&#92;&quot;:0.03,&#92;&quot;ask_low&#92;&quot;:0.03,&#92;&quot;ask_close&#92;&quot;:0.03,&#92;&quot;price_open&#92;&quot;:0.03,&#92;&quot;price_high&#92;&quot;:0.03,&#92;&quot;price_low&#92;&quot;:0.03,&#92;&quot;price_close&#92;&quot;:0.03,&#92;&quot;price_mean&#92;&quot;:0.03,&#92;&quot;volume&#92;&quot;:10.0,&#92;&quot;open_interest&#92;&quot;:10.0,&#92;&quot;event_ticker&#92;&quot;:&#92;&quot;FEDDECISION-23DEC&#92;&quot;,&#92;&quot;bucket&#92;&quot;:&#92;&quot;C24&#92;&quot;,&#92;&quot;outcome&#92;&quot;:&#92;&quot;Cut &#92;u003e25bps&#92;&quot;,&#92;&quot;strike&#92;&quot;:NaN}]&quot;' data-total-rows='5' data-total-columns='21' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;ts&quot;,[&quot;datetime&quot;,&quot;datetime64[ms, UTC]&quot;]],[&quot;bid_open&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;bid_high&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;bid_low&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;bid_close&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;ask_open&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;ask_high&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;ask_low&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;ask_close&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;price_open&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;price_high&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;price_low&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;price_close&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;price_mean&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;volume&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;open_interest&quot;,[&quot;number&quot;,&quot;float64&quot;]],[&quot;event_ticker&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;bucket&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;outcome&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;strike&quot;,[&quot;number&quot;,&quot;float64&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element></div></div>"
+          }
+        }
+      ],
+      "console": []
+    }
+  ]
+}

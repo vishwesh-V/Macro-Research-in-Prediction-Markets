@@ -1,0 +1,5728 @@
+openapi: 3.1.0
+info:
+  title: Polymarket Data API v2
+  description: >-
+    The Polymarket Data API: wallet portfolios, trade and activity feeds, market
+    state and ranked boards.
+
+
+    ## Conventions every endpoint shares
+
+
+    - **Envelope**: every response wraps its payload in `data` (paged routes add
+    `pagination`). A documented miss is `data: null` or an empty list, never an
+    error.
+
+    - **Pagination is cursor-only**: follow `pagination.next_cursor` until
+    `null`; `has_more` is exact, and there is no `offset` query parameter
+    (sending one is a `400`). Cursors are signed, typed per endpoint, and
+    opaque. The feeds (`trades`, `activity`, combo activity) are keyset walks,
+    stable across concurrent writes; the boards, `holders` and most
+    combo-position sorts are offset walks behind the opaque token, so a page
+    taken across a data refresh can skip or repeat rows. Where a cursor binds
+    its cohort (the boards, positions, combo positions), resuming bare is fine,
+    restating the same values is fine, and contradicting them is a `400`. The
+    `trades`/`activity` feed cursors carry only the seek anchor and page size
+    (plus the sort direction on activity): re-send identical filters on every
+    page, because changing one mid-walk re-anchors silently.
+
+    - **Rate limiting**: `429` with `Retry-After` is the busy signal for heavy
+    queries. A heavy query may first be queued briefly for a capacity slot; the
+    `429` arrives only if that short wait ends unserved. Each caller also has a
+    per-client request allowance, and bursts past it get the same `429` with
+    `Retry-After` sized to the remaining wait. Retry after the given delay. A
+    request that could not get a database connection within its budget is NOT a
+    `429`: it is a `503` `request_timeout` with `Retry-After`, because the
+    shortage is on the server side, not in the caller's rate.
+
+    - **Identifiers**: `condition` (aliases `condition_id`, `conditionId`) is
+    the unified query key for on-chain 0x condition ids; `market_id` fields
+    carry Gamma's own market ids; `event_id` takes Gamma event ids; `token_id`
+    is the CLOB asset id (the key on `/v2/prices-history`).
+
+    - **Params** accept both snake_case and camelCase spellings.
+
+    - **Units**: bare `volume`/`size` values are **shares**; `_usdc` suffixed
+    fields are USD; `taker_` prefixed volumes are one-side.
+
+    - **Sentinels**: `outcome_index: 999` means the outcome could not be
+    labeled; a missing or `null` numeric field means unavailable, never zero.
+
+    - **Windows on `/v2/trades?user=` and `/v2/activity`**: an omitted or `0`
+    `start` floors to three years back (`start=1` asks for full history); an
+    omitted or `0` `end` is now plus one day. The other `/v2/trades` shapes
+    ignore `start`/`end`: `condition`/`event_id` serve a fixed three-year window
+    and the bare feed serves the rolling current-plus-previous month. Other
+    windowed routes treat omitted/`0` bounds as unbounded; each documents its
+    own rule. `/v2/prices-history` is the strict one, where a `0` bound is a
+    `400`.
+
+    - **Errors**: every unsuccessful response is JSON with a human-readable
+    `error`, stable `code`, `retryable` flag, and opaque `trace_id`; validation
+    failures may also name `parameter`. Codes map to statuses as follows:
+    `invalid_request` = `400`, `not_found` = `404`, `method_not_allowed` =
+    `405`, `rate_limited` = `429`, `internal` = `500`, and both
+    `request_timeout` (the request deadline, the datastore's statement timeout,
+    or the connection pool's acquire budget) and `dependency_unavailable` =
+    `503`. A `429` or `503` that is worth retrying carries `Retry-After` in
+    seconds. Every response, successful or not, echoes the same id in the
+    `x-trace-id` header; supply it when reporting a failure so operators can
+    correlate it with telemetry.
+
+    - **Auth**: none. All data routes are public; no API key or token is
+    required.
+  contact:
+    name: Polymarket
+  license:
+    name: MIT
+    identifier: MIT
+  version: 0.1.0
+servers:
+  - url: https://data-api.polymarket.com
+    description: Production
+  - url: https://data-api-rs.stage.pmd.use1.polymarket.sh
+    description: Staging
+paths:
+  /v2/activity:
+    get:
+      tags:
+        - feeds
+      summary: List account activity
+      description: >-
+        Keyset-paginated activity feed (trades, splits, merges,
+
+        redeems, …) in the standard `{ data, pagination }` envelope.
+
+
+        Ordering is `(block_timestamp, sequence_id)`, `DESC` by default or `ASC`
+        via
+
+        `sort_direction=ASC`; both keyset-seekable. Value sorts
+        (`CASH`/`TOKENS`)
+
+        have no seek anchor and are rejected with `400` rather than silently
+
+        re-served as page one. The cursor binds the direction it was minted
+        under
+
+        and the resume ADOPTS it, so a replay cannot flip the walk mid-stream.
+
+
+        A malformed `condition` id is a `400` naming the value; a
+
+        well-formed one that matches nothing serves an empty `data` array, which
+
+        is the meaningful zero-state; absence means the market is not servable,
+
+        and only that.
+      operationId: get_activity
+      parameters:
+        - name: user
+          in: query
+          description: Required; the feed is user-anchored.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: Page size; default 100, max 1000, past-cap rejected.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: |-
+            Opaque cursor from a prior response's `next_cursor`; binds the sort
+            direction it was minted under.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: type
+          in: query
+          description: >-
+            Activity type(s), comma-separated (TRADE, SPLIT, MERGE, REDEEM, …).
+
+
+            `TIP` is **opt-in**: it is never in the default set, so it is only
+
+            returned when you name it here. A tip is a user↔user pUSD transfer
+            that
+
+            is not a trade-settlement leg; `size` is the amount and `side`
+            carries the
+
+            direction (`IN` received / `OUT` sent).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: condition
+          in: query
+          description: |-
+            Condition id(s), comma-separated (at most 20 distinct values).
+            `condition_id` / `conditionId` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: event_id
+          in: query
+          description: >-
+            Gamma event id(s), comma-separated (at most 20 distinct values);
+
+            resolves to the events' markets. Mutually exclusive with
+            `condition`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: side
+          in: query
+          description: BUY or SELL.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: start
+          in: query
+          description: >-
+            Window start on `block_timestamp`, epoch seconds (inclusive).
+            Omitted
+
+            or `0` floors to three years back; pass `start=1` for full history.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: end
+          in: query
+          description: |-
+            Window end, epoch seconds (inclusive); omitted or `0` means now plus
+            one day.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: sort_by
+          in: query
+          description: Only `TIMESTAMP` is supported (v2 pages by keyset).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: sort_direction
+          in: query
+          description: |-
+            `ASC` or `DESC` (default). The keyset seeks in the chosen direction;
+            the minted cursor binds it, so pass it consistently when paging.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: exclude_deposits_withdrawals
+          in: query
+          description: Defaults to `true`.
+          required: false
+          schema:
+            type:
+              - boolean
+              - "null"
+      responses:
+        "200":
+          description: A page of activity events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityPage"
+        "400":
+          description: Missing `user`, invalid query params, unsupported sort, bad cursor,
+            a malformed 'condition' id, or a 'user' that is a known protocol
+            contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/activity/combos:
+    get:
+      tags:
+        - feeds
+      summary: List combo activity
+      description: >-
+        Keyset-paginated combo lifecycle + redemption
+
+        feed for a user, in the standard `{ data, pagination }` envelope.
+
+
+        Pass `?cursor=` from a prior response's `next_cursor` to fetch the next
+        page.
+
+        Unlike the activity feed, the anchor behind the cursor is
+
+        `(block_number, log_index)`; this endpoint's total order.
+
+
+        A malformed `condition` combo condition id is a `400` naming the value;
+        a
+
+        well-formed one that matches nothing serves an empty `data` array, which
+
+        is the meaningful zero-state.
+      operationId: get_combos
+      parameters:
+        - name: user
+          in: query
+          description: Required; the feed is user-anchored.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: condition
+          in: query
+          description: |-
+            Combo condition id(s), comma-separated (at most 20 distinct values).
+            `condition_id` / `conditionId` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of combo activity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComboActivityPage"
+        "400":
+          description: Invalid query params or cursor, a malformed 'condition' combo id,
+            or a 'user' that is a known protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/approvals:
+    get:
+      tags:
+        - wallet
+      summary: Get wallet approvals
+      description: >-
+        Polygon token/operator approval state for one wallet.
+
+
+        `?user=` must be an EVM address. The complete served catalog is returned
+        in
+
+        canonical order under `{ data }`; this endpoint is not paginated.
+      operationId: get_approvals
+      parameters:
+        - name: user
+          in: query
+          description: The proxy wallet whose approval state to return. Required EVM
+            address.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: Approval state for the wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Approvals"
+        "400":
+          description: Missing or invalid 'user' address, or a 'user' that is a known
+            protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/biggest-winners:
+    get:
+      tags:
+        - boards
+      summary: List the biggest wins
+      description: >-
+        The biggest single winning positions.
+
+
+        One row per winning POSITION, not per user: `pnl` is
+
+        `final_value - initial_value` for that position, and the window
+
+        (`?time_period=`, default `day`) is on when it resolved. `?category=`
+
+        narrows to a market category. Deeper pages come only from `?cursor=`,
+
+        which **pins the window and category it was minted on**; restating a
+
+        different one is a `400`, not a silent re-point.
+
+
+        Combo wins are first-class rows here, tagged `kind = "combo"`. They
+        carry a
+
+        `' / '`-joined title of their legs and no Gamma event; `event_id` is `0`
+
+        and `event_slug` empty; so **branch on `kind` before building an event
+
+        link**.
+      operationId: get_biggest_winners
+      parameters:
+        - name: time_period
+          in: query
+          description: "Window on `resolved_at`: `day` | `week` | `month` | `all`.
+            Defaults to `day`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: category
+          in: query
+          description: |-
+            `overall` (default), a Gamma market category (e.g. `sports`), or a
+            synthetic category: `combos` (combinatorial wins get their own full
+            top-500 per window) or `esports` (promoted subcategory).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of the biggest winning positions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BiggestWinnersPage"
+        "400":
+          description: Invalid time_period or cursor, or a param that contradicts the
+            cursor pin
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/builders/leaderboard:
+    get:
+      tags:
+        - boards
+      summary: Get the builders leaderboard
+      description: >-
+        The ranked board of builders by volume.
+
+
+        `?time_period=` is `day` (default), `week`, `month` or `all` and selects
+        the
+
+        **window**; one row per builder in it. Deeper pages come only from
+
+        `?cursor=`.
+
+
+        A cursor **pins the window it was minted on**, so following it needs no
+
+        `?time_period=`; and passing a different one is a `400` rather than a
+
+        silent re-point, since an offset from one board means nothing on
+        another.
+
+
+        `volume` is in SHARES, not USDC, the same unit as `/v2/leaderboard`'s
+
+        `volume`. `active_users` counts distinct makers in the window.
+
+
+        `builder` is a display name that falls back to `builder_code` for a
+        builder
+
+        with no profile, so key on `builder_code` and render `builder`.
+      operationId: get_builders_leaderboard
+      parameters:
+        - name: time_period
+          in: query
+          description: "Window: `day` | `week` | `month` | `all`. Defaults to `day`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of the builders board
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildersLeaderboardPage"
+        "400":
+          description: Invalid time_period or cursor, or a time_period that contradicts
+            the cursor's
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/builders/volume:
+    get:
+      tags:
+        - boards
+      summary: Get builder volume over time
+      description: >-
+        The per-builder volume time series.
+
+
+        `?interval=` is the **bucket width**, not a window: `day` (default)
+        returns
+
+        every day on record bucketed daily, `week` and `month` bucket
+        accordingly,
+
+        and `all` buckets by calendar YEAR. `?limit=` bounds how many of the
+        most
+
+        recent buckets come back (default 30); buckets, not rows, so a period is
+
+        never returned half-populated. `timePeriod` is accepted as an alias for
+
+        `interval`.
+
+
+        `rank` is the builder's placing **within its own bucket**, so it moves
+        along
+
+        the series. `volume` is in SHARES; see `/v2/builders/leaderboard`.
+
+
+        Not paginated: `data` is the array with no `pagination`, the `/v2/oi`
+        shape.
+
+        Rows arrive newest bucket first, ranked within each.
+      operationId: get_builders_volume
+      parameters:
+        - name: interval
+          in: query
+          description: |-
+            Bucket width: `day` | `week` | `month` | `all`. Defaults to `day`.
+            `timePeriod` and `time_period` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: >-
+            How many of the most recent buckets to return. Defaults to 30,
+            capped at
+
+            90; a lower ceiling than the rest of the surface, because only ~308
+
+            daily buckets exist and the family maximum would return the whole
+            series.
+
+
+            Bounds BUCKETS, not rows: a row limit would cut a bucket in half and
+
+            leave a partial period in the series.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 90
+            minimum: 0
+      responses:
+        "200":
+          description: The volume series for the requested interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Vec_BuilderVolumePoint"
+        "400":
+          description: Invalid interval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/holders:
+    get:
+      tags:
+        - markets
+      summary: List a market's top holders
+      description: >-
+        Top holders of a market, netted per user and grouped by
+
+        outcome token.
+
+
+        `?condition=` (CSV of `condition_id`) is required (400 otherwise).
+        `?limit=`
+
+        (default 100, max 1000; v2 family-uniform) sizes the page **per outcome
+
+        token**; `?min_balance=` filters the served amount.
+
+
+        `?include_pnl=true` opts each holder row into the position economics
+
+        (entry price and cost, current price and value, realized, unrealized and
+
+        total profit) and switches the amounts to per-side gross balances, so a
+
+        wallet holding both outcomes appears under both tokens. The default
+
+        response is unchanged. This mode serves one market's table at a time:
+
+        exactly one `condition` and `limit` at most 100 (400 otherwise,
+        including
+
+        via a cursor that carries a wider window).
+
+
+        A malformed condition id is a `400` naming the value; a well-formed one
+
+        that resolves to no holdings serves an empty `data` array, which is the
+
+        meaningful zero-state.
+
+
+        Deeper pages come only from `?cursor=` (which carries the page window
+        and
+
+        overrides `limit`).
+
+
+        Page walks advance every token group together, so a group leaves `data`
+
+        once its token is exhausted while others keep paging; no rows are lost,
+
+        but merge pages by `token_id`, not by array position.
+      operationId: get_holders
+      parameters:
+        - name: condition
+          in: query
+          description: >-
+            Comma-separated `condition_id`s (at most 20 distinct values; exactly
+
+            one with `include_pnl=true`). Required. `condition` is the unified
+            key
+
+            across v2 (same as the feeds and `/v2/oi`); `condition_id` /
+
+            `conditionId` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: |-
+            Rows per outcome token; defaults to 100, maximum 1000 (100 with
+            `include_pnl=true`).
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: >-
+            Opaque pagination cursor from a prior response's `next_cursor`;
+            carries
+
+            the per-token `(limit, offset)` window and overrides `limit`. Paging
+
+            past the first page is cursor-only.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: min_balance
+          in: query
+          description: >-
+            Minimum net balance in shares (default 0), applied post-netting.
+            With
+
+            `include_pnl=true` it applies to the served per-side gross amount
+
+            instead.
+          required: false
+          schema:
+            type:
+              - number
+              - "null"
+            format: double
+        - name: include_pnl
+          in: query
+          description: >-
+            Opt into per-holder position economics (default `false`;
+            `includePnl`
+
+            is an accepted alias). Adds `avg_price`, `entry_cost_usdc`,
+
+            `current_price`, `current_value`, `realized_pnl`, `unrealized_pnl`
+            and
+
+            `total_pnl` to every holder row, and switches the served amounts to
+
+            per-side gross balances: a wallet holding both outcomes appears
+            under
+
+            both tokens with per-side sizes and that side's economics, matching
+
+            `/v2/positions` for the same wallet and token. This mode serves one
+
+            market's table at a time: exactly one `condition`, `limit` at most
+            100.
+          required: false
+          schema:
+            type:
+              - boolean
+              - "null"
+      responses:
+        "200":
+          description: A page of top holders per outcome token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HoldersPage"
+        "400":
+          description: Missing 'condition', invalid params, or invalid cursor, or a
+            malformed 'condition' id; with 'include_pnl', also more than one
+            'condition' or a limit above 100 (including a cursor that carries a
+            wider window)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/leaderboard:
+    get:
+      tags:
+        - boards
+      summary: Get the trader leaderboard
+      description: >-
+        The ranked board of realized PnL, combos included.
+
+
+        `?time_period=` is `day` (default), `week`, `month` or `all`;
+        `?category=`
+
+        is `overall` (default) or a market category; `?sort_by=` picks the `PNL`
+
+        (default) or `VOLUME` board. Deeper pages come only from `?cursor=`.
+
+
+        A cursor **pins the board it was minted on**; sort, window and category;
+
+        so following it needs no params at all, and restating a different one is
+        a
+
+        `400` rather than a silent re-point (the builders-board pattern).
+
+
+        `?user=` answers a different question; one wallet's standing, carrying
+
+        **both** the PnL and volume ranks in a single object rather than a page.
+        A
+
+        rank of `0` there means unranked for that board, not first. `sort_by`,
+
+        `limit` and `cursor` do not apply to that arm.
+
+
+        **`rank` ties and skips**: tied users share a rank and the next one
+        jumps,
+
+        so a partition's highest rank approaches its row count. Page with the
+
+        cursor; never compute a page from a rank.
+
+
+        Finite windows (day/week/month) serve the MARKED equity change net of
+
+        flows; they move with unrealized marks; `all` is the realized-only
+
+        lifetime ledger. `volume` is in shares, not USDC.
+      operationId: get_leaderboard
+      parameters:
+        - name: time_period
+          in: query
+          description: "Window: `day` | `week` | `month` | `all`. Defaults to `day`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: category
+          in: query
+          description: >-
+            `overall` (default), a Gamma market category (e.g. `sports`), or a
+
+            synthetic category: `combos` (combinatorial positions; PNL boards
+            only;
+
+            the volume board has no combos rows) or `esports` (promoted
+            subcategory).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: sort_by
+          in: query
+          description: "Which board: `PNL` (default) or `VOLUME`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: user
+          in: query
+          description: >-
+            Look up one wallet's standing instead of reading the board. Returns
+            a
+
+            single object carrying both ranks, not a page.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of the board, or one wallet's standing when `user` is given
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaderboardResponse"
+        "400":
+          description: "Board arm: invalid `time_period`, `sort_by`, or `cursor`,
+            including a param that contradicts the cursor's pinned board. User
+            arm (`?user=`): invalid `time_period` only; `sort_by`, `limit` and
+            `cursor` do not apply there and are ignored, not rejected, but a
+            `user` that is a known protocol contract address is refused"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/live-volume:
+    get:
+      tags:
+        - markets
+      summary: Get live volume for an event
+      description: >-
+        Cumulative one-side (taker) volume per market.
+
+
+        Pass `?event_id=` as a comma-separated list of integer event ids
+        (aliases `id` / `eventId`); every market under those events is returned,
+        `taker_volume`
+
+        descending, with `taker_volume_total` their sum. A list spans events.
+        Unlike the
+
+        feeds this is not paginated; `data` is
+
+        the object with no `pagination`.
+
+
+        Unparseable ids are ignored; a request whose ids are *all* unparseable
+        is a
+
+        400 rather than an empty 200, so a typo cannot read as "no volume". Ids
+        are
+
+        sorted and deduplicated before the lookup, so `?event_id=20,10` and
+
+        `?event_id=10,20` are the same request and share a cache entry.
+
+
+        At most 20 distinct event ids per request, the same selector ceiling the
+
+        `condition=` lists carry: every named event contributes all of its
+        markets
+
+        to a single aggregation, so the list is what sizes the request.
+      operationId: get_live_volume
+      parameters:
+        - name: event_id
+          in: query
+          description: >-
+            Event id(s), comma-separated (at most 20 distinct values). Required.
+
+            `event_id` is the unified key across v2 (same as the feeds); `id`
+            and
+
+            `eventId` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: Per-market taker volume for the requested event(s), plus
+            taker_volume_total
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_LiveVolume"
+        "400":
+          description: Missing or unparseable event_id, or more than 20 distinct event ids
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/oi:
+    get:
+      tags:
+        - markets
+      summary: Get open interest
+      description: >-
+        Priced gross open interest per market.
+
+
+        Pass `?condition=` as a comma-separated list of condition ids (aliases
+        `condition_id` / `conditionId`, matching the feeds); omit it for the
+        single
+
+        global figure (`condition_id = "GLOBAL"`, still a one-element array).
+
+        Every requested id that resolves to a servable market (indexed, active,
+
+        not archived; any id family) returns a row, with `value: 0` when
+
+        nothing is held; an id absent from `data` did not resolve to a servable
+
+        market. A malformed id is a `400` naming the value, so absence carries
+        that
+
+        one meaning and nothing else. Unlike the feeds this is not paginated;
+
+        `data` is the row array with no `pagination`.
+      operationId: get_oi
+      parameters:
+        - name: condition
+          in: query
+          description: |-
+            Condition id(s), comma-separated (at most 20 distinct values).
+            `condition` is the unified key across v2 (same as the feeds);
+            `condition_id` / `conditionId` are accepted aliases. Omit for global
+            open interest.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: Open interest per requested market, or the global figure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Vec_OpenInterest"
+        "400":
+          description: Invalid query params, or a malformed 'condition' id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/positions:
+    get:
+      tags:
+        - wallet
+      summary: List positions for a user or market
+      description: >-
+        A keyset page of positions in the standard
+
+        `{ data, pagination }` envelope. One route serves a user's open book,
+        their
+
+        closed book (`status=CLOSED`), and a market's holders (market anchor).
+
+
+        At least one of `user`/`condition` is required. Supplying both anchors
+        on the
+
+        user and applies `condition` as a narrowing filter.
+
+
+        `status` defaults to `OPEN`, which is the **superset**: a
+
+        settled-but-unredeemed winner still holds its tokens, so it is an open
+
+        position whose condition resolved. `REDEEMABLE` narrows to that subset,
+        and
+
+        each row echoes its own `status`.
+
+
+        Resume contract: a `next_cursor` binds the
+        `status`/`sortBy`/`sortDirection`
+
+        the walk started with. To follow it, send `cursor` together with the
+        same
+
+        `user` or `condition` anchor used on the first page; a bare `?cursor=`
+        request
+
+        returns 400. The token is the authority on the spine and the total
+        order,
+
+        and the handler adopts all three from it. Restating them is allowed and
+
+        must agree;
+
+        **explicitly** contradicting one is a 400, because replaying an anchor
+        under
+
+        a different spine or order would silently walk a different result set.
+
+        Omitting them is not a contradiction; a defaulted `status` is the
+        absence of
+
+        a choice, not a request for `OPEN`.
+
+
+        A malformed `condition` id is a `400` naming the value; a
+
+        well-formed one that matches nothing serves an empty `data` array, which
+
+        is the meaningful zero-state; absence means the market is not servable,
+
+        and only that.
+      operationId: get_positions
+      parameters:
+        - name: user
+          in: query
+          description: The wallet to anchor on. At least one of `user`/`condition` is
+            required.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: condition
+          in: query
+          description: >-
+            Condition id(s), comma-separated (at most 20 distinct values). With
+
+            `user`, narrows that user's positions (all ids honoured). Without
+
+            `user`, anchors on the market's holders; exactly one id is accepted
+
+            there, and a multi-id list is rejected rather than silently
+            truncated.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied (the cursor's
+            size wins).
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: >-
+            Opaque pagination cursor from a prior response's `next_cursor`. It
+
+            carries the page position, page size, and the status/sort/direction
+            it
+
+            was minted under.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: status
+          in: query
+          description: >-
+            One of `OPEN`, `REDEEMABLE`, `REDEEMABLE_LOST`, `MERGEABLE`, or
+            `CLOSED`;
+
+            defaults to `OPEN`. `REDEEMABLE_LOST` requires `user`, supports all
+            six
+
+            sorts, and defaults to `CURRENT_VALUE`; it preserves row status
+
+            `REDEEMABLE`. `MERGEABLE` is `OPEN` narrowed to live complementary
+            pairs
+
+            (conditions where the wallet holds >= 2 servable-live tokens) and
+            defaults
+
+            to `TOKENS`; it is user-scoped, so a market-anchored request renders
+            as
+
+            `OPEN`.
+
+
+            `OPEN` is the superset; it includes settled-but-unredeemed winners,
+
+            which `REDEEMABLE` narrows to. `CLOSED` is exited positions.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: event_id
+          in: query
+          description: |-
+            Event id(s), comma-separated (at most 20 distinct values).
+            User-anchored only.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: title
+          in: query
+          description: |-
+            Case-insensitive market-title substring filter, honoured on every
+            anchor and status. SQL LIKE wildcards (`%`, `_`) keep their usual
+            meaning; empty or whitespace-only is treated as absent; at most 200
+            characters. NOT carried by the cursor: re-send it on every page of a
+            walk (like `condition` and the `start`/`end` window), or the cohort
+            silently widens.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: filter_type
+          in: query
+          description: |-
+            `CASH` or `TOKENS`; defaults to `TOKENS` (the /v2/trades-homogenized
+            filter pair, replacing the former `size_threshold`).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: filter_amount
+          in: query
+          description: |-
+            The filter floor. `TOKENS`: minimum CURRENT holding in shares
+            (defaults to the 0.1 dust floor; applies to `OPEN`/`REDEEMABLE`; a
+            user's `CLOSED` set is not narrowed by it, and on a market anchor it
+            moves the OPEN/CLOSED boundary). `CASH`: minimum mark-to-market
+            `current_value` in USDC, on top of the token dust floor. Invalid
+            values fall back to the default.
+          required: false
+          schema:
+            type:
+              - number
+              - "null"
+            format: double
+        - name: include_archived
+          in: query
+          description: >-
+            Also include positions on archived markets; defaults to `false`.
+
+            `OPEN`/`REDEEMABLE`/`REDEEMABLE_LOST`/`MERGEABLE` only; combining it
+            with
+
+            `status=CLOSED` is rejected. Inactive markets remain excluded either
+            way.
+          required: false
+          schema:
+            type:
+              - boolean
+              - "null"
+        - name: sort_by
+          in: query
+          description: >-
+            One of `CURRENT_VALUE`, `PRICE`, `TOKENS`, `UNREALIZED_PNL`,
+
+            `REALIZED_PNL`, `TOTAL_PNL`, or `TIMESTAMP` (the row's
+            `last_event_at`).
+
+            `PRICE` ranks by the response's effective `current_price` on every
+
+            supported anchor and status. On `REDEEMABLE`, the existing
+            winners-first
+
+            partition remains ahead of the requested price order. The default
+
+            follows the status: `CURRENT_VALUE` for `OPEN`/`REDEEMABLE`,
+
+            `REALIZED_PNL` for `CLOSED`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: start
+          in: query
+          description: >-
+            Inclusive lower bound on `last_event_at`, epoch seconds; omit or `0`
+            for
+
+            unbounded (the `/v2/activity` + `/v2/trades` vocabulary).
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: end
+          in: query
+          description: >-
+            Inclusive upper bound on `last_event_at`, epoch seconds; omit or `0`
+            for
+
+            unbounded.
+
+
+            A position with no native economics carries no `last_event_at` and
+            is
+
+            therefore **excluded by any bound**, in either direction; a window
+            asks
+
+            which positions moved inside it, and a row with no clock has no
+            answer.
+
+            Unbounded requests still serve those rows.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: sort_direction
+          in: query
+          description: "`ASC` or `DESC`; defaults to `DESC`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of positions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PositionsPage"
+        "400":
+          description: Missing anchor, invalid query params or cursor, an unknown
+            status/sort/direction, a malformed 'condition' id, an over-long
+            'title', or a 'user' that is a known protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/positions/combos:
+    get:
+      tags:
+        - wallet
+      summary: List combo positions
+      description: >-
+        Combo positions for a user, in the standard
+
+        `{ data, pagination }` envelope.
+
+
+        Sorts: `FIRST_ENTRY` (default) | `ENTRY_COST` (+ `CURRENT_VALUE` alias)
+        |
+
+        `UPDATED`, each with `sort_direction`. `FIRST_ENTRY DESC` pages by the
+
+        two-state keyset anchor `(first_entry_at_micros, combo_condition_id,
+
+        outcome_index)` (NULL micros = the NULL tail); `UPDATED ASC` by the
+
+        single-state `(updated_at_micros, …)` anchor; every other combination by
+        an
+
+        offset-shaped token. The cursor binds sort + direction and the resume
+
+        ADOPTS them, so a replay cannot flip or re-sort the walk mid-stream.
+
+
+        It binds the cohort; `user`/`status`/`condition`/`updated_after`/
+
+        `updated_before`; the same way: following a
+
+        page needs nothing but `?user=` (always required here) and `?cursor=`,
+        and
+
+        restating a filter is allowed but must agree. Omitting one is not a
+
+        contradiction, it is the absence of a choice; **contradicting** one is a
+
+        400, because the token's walk state only means anything against the
+        cohort
+
+        it was minted on.
+
+
+        Incremental sync: `updated_after`/`updated_before` are an INCLUSIVE
+
+        epoch-second window on `updated_at`. Without a `status` filter, either
+
+        bound switches the response to the mirror-complete sync view (every live
+
+        row, not only held ones); a `status` filter keeps its own visibility.
+        The
+
+        upper end is always capped by a short stability ceiling (~90s behind
+        now)
+
+        so a mirror never reads rows that may still move. Pair with
+
+        `sortBy=UPDATED&sortDirection=ASC` for the stable sync order.
+
+
+        A malformed `condition` combo condition id is a `400` naming the value;
+        a
+
+        well-formed one that matches nothing serves an empty `data` array, which
+
+        is the meaningful zero-state.
+      operationId: get_combo_positions
+      parameters:
+        - name: user
+          in: query
+          description: The wallet to anchor on. Required; combo positions are user-anchored.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied (the cursor's
+            size wins).
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: condition
+          in: query
+          description: |-
+            Combo condition id(s), comma-separated (at most 20 distinct values).
+            `condition_id` / `conditionId` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: status
+          in: query
+          description: >-
+            One of `OPEN`, `REDEEMABLE`, `PARTIAL`, `RESOLVED_WIN`,
+            `RESOLVED_LOSS`,
+
+            `RESOLVED_PARTIAL`; default (absent) is the held-visibility listing.
+
+
+            Aligned with `/v2/positions`: `OPEN` is the superset; it includes
+
+            still-held redeemable positions; and `REDEEMABLE` narrows to exactly
+
+            the rows whose `redeemable` flag is `true`. `REDEEMABLE` must be the
+
+            sole value; the other values may be combined comma-separated and
+            keep
+
+            per-value equality semantics.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: sort_by
+          in: query
+          description: >-
+            `FIRST_ENTRY` (default, except under `status=REDEEMABLE`, which
+            defaults
+
+            to `ENTRY_COST` so the largest claims lead) | `ENTRY_COST` |
+
+            `CURRENT_VALUE` (alias of `ENTRY_COST`) | `UPDATED`. `FIRST_ENTRY
+            DESC`
+
+            and `UPDATED ASC` page by keyset; every other combination pages by
+            an
+
+            offset-shaped cursor. The minted cursor binds sort + direction along
+
+            with the `status`/`condition` cohort, so a page-2 request needs only
+
+            `?user=` and `?cursor=`; restating a filter is allowed but must
+            agree.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: sort_direction
+          in: query
+          description: "`ASC` or `DESC` (default `DESC`)."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: updated_after
+          in: query
+          description: >-
+            Incremental-sync watermark: INCLUSIVE lower bound on `updated_at`,
+
+            epoch seconds. Without a `status` filter, either watermark serves
+            the
+
+            sync view; every live row (mirror-complete), not only the held
+
+            listing; a `status` filter keeps its own row visibility. The
+            window's
+
+            upper end is always capped by a short stability ceiling (about 90
+
+            seconds behind now), so a bound in the future cannot serve rows that
+
+            may still move.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: updated_before
+          in: query
+          description: |-
+            Incremental-sync watermark: INCLUSIVE upper bound on `updated_at`,
+            epoch seconds; must not precede `updated_after`. See `updated_after`
+            for the sync-view and ceiling semantics.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+      responses:
+        "200":
+          description: A page of combo positions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComboPositionsPage"
+        "400":
+          description: Invalid query params or cursor, an invalid sync watermark
+            (negative, or an inverted window), a malformed 'condition' combo id,
+            or a 'user' that is a known protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/prices-history:
+    get:
+      tags:
+        - markets
+      summary: Get a token's price history
+      description: >-
+        The price-history series for one outcome token, or
+
+        a single point-in-time observation.
+
+
+        Three window forms, exactly one per request: `start` (with optional
+        `end`),
+
+        `interval`, or `as_of`. Points are served oldest-first; pass `?cursor=`
+        from
+
+        a prior response's `next_cursor` for the next page.
+
+
+        `interval=max` (or `all`) serves the market's whole life, back to 2022
+        for
+
+        the oldest markets, at 12-hour buckets unless `bucket_seconds` says
+
+        otherwise; explicit `start`/`end` windows cap at 15 days, so the presets
+
+        are the long-range path.
+
+
+        The series ends with a **terminal point**: the latest observation inside
+        the
+
+        window, which is a real tick and so can fall between bucket boundaries.
+
+        Nothing may assume uniform spacing (sparse data already forbids that),
+        and
+
+        each point's `resolution_seconds` says what window it was observed in.
+
+
+        **Availability is graded by resolution.** The 3-hour and 12-hour series
+        are
+
+        permanent (back to 2022-11-18); the fine grains are windowed, with these
+
+        MINIMUMS: 1-minute data at least 7 days, 5-minute at least 60, 30-minute
+        at
+
+        least 90. Floors, not exact horizons: data expires in multi-day chunks,
+        so a
+
+        grain usually reaches a few days further back than its minimum. Coverage
+        is
+
+        measured per request, never assumed from a table, so `bucket_seconds=60`
+
+        over a window starting a month ago is an incompatible pair: both values
+        are
+
+        valid, and there is no data at their intersection.
+
+
+        The two ways of asking behave differently on purpose:
+
+
+        * **`bucket_seconds` sent** is served exactly as asked, so over a window
+          whose resolution has expired you get an empty page rather than a silent
+          substitution.
+        * **`bucket_seconds` omitted** lets the server choose a width that can
+          actually serve the window: the finest tier grain whose series stays under
+          ~2,500 points, except that a window wider than 12 hours never defaults to
+          the 60-second grain (ask for `bucket_seconds=60` explicitly when you want
+          it over a longer window), and
+          coarsened further if that grain does not reach the window's start. A
+          window up to 12 hours keeps 1-minute detail (an hour 60 points, 12 hours
+          720); beyond that it moves to a materialized tier (a day 288, three days
+          864, a week 2,016, fifteen days 720). Send `bucket_seconds` when you want
+          a specific density instead.
+
+        A RESOLVED market's series ends with one settlement point: the on-chain
+
+        payout of the requested token (0 lost, 1 won, fractional for voided or
+
+        split resolutions) at `resolution_seconds` 0, placed one bucket edge
+        past
+
+        the last stored row and clamped to an explicit window's `end`. It
+        appears
+
+        only on the final page of a paginated walk, and only once the resolution
+
+        is settled on-chain; an unresolved market's series is unchanged.
+
+
+        `resolution_seconds` on every point reports what it was served at, so
+        read it
+
+        instead of assuming the width a recent window would have given you. For
+        a
+
+        multi-day window prefer a grain-aligned `bucket_seconds` (300, 1800,
+        10800,
+
+        43200) or omit it; a 60-second width over days is the one shape that is
+        both
+
+        slow and, past 7 days, empty.
+      operationId: get_prices_history
+      parameters:
+        - name: token_id
+          in: query
+          description: >-
+            Outcome token id (the CLOB asset id the chart is keyed by).
+            Required.
+
+            `tokenId` is an accepted alias.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: start
+          in: query
+          description: >-
+            Window start, epoch seconds, INCLUSIVE. Alone it means "up to the
+
+            present", and is capped at 15 days back from now.
+
+
+            Pass `end` too when paging: a window that tracks the present keeps
+
+            growing at the tip, and the 15-day cap is re-checked on every page,
+            so a
+
+            walk that starts near the cap can outlive it.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: end
+          in: query
+          description: >-
+            Window end, epoch seconds, EXCLUSIVE. Requires `start`; on its own
+            it
+
+            would ask for every point ever recorded up to `end`.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: interval
+          in: query
+          description: >-
+            Relative window INSTEAD of `start`/`end`: `max`, `all`, `1m`, `1w`,
+
+            `1d`, `6h`, `1h`, matched case-sensitively. An empty `interval=` is
+            a
+
+            malformed value, not an absent one.
+
+
+            `max`/`all` serve the market's WHOLE life (back to 2022 for the
+            oldest
+
+            markets) at 12-hour buckets by default; at `bucket_seconds` of 10800
+            or
+
+            43200 the window is unbounded, while finer widths keep a 30-day
+            window.
+
+            The other intervals take a width sized to their own span when
+
+            `bucket_seconds` is omitted (`1h`/`6h`/`1d` 60, `1w` 300, `1m`
+            1800), and
+
+            each still floors an explicit value: 600 for `max`/`all`/`1m`, 300
+            for
+
+            `1w`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: bucket_seconds
+          in: query
+          description: >-
+            Bucket width in SECONDS (60…86400). `bucketSeconds` is an accepted
+            alias.
+
+
+            OMIT it and the server sizes the width to the window: the finest
+            tier
+
+            grain (60, 300, 1800, 10800, 43200) that keeps the series under
+            ~2,500
+
+            points, except that an explicit window wider than 12 hours never
+
+            defaults to the 60s grain (send `bucket_seconds=60` when you want
+
+            second-by-minute detail over a longer window), and coarsened further
+            if
+
+            that grain no longer reaches the window's start.
+
+            So a window up to 12 hours keeps 1-minute detail, half a day through
+            a
+
+            week defaults to 300, fifteen days to 1800; interval presets keep
+            their
+
+            own span-derived defaults (`1d` 60s, `1w` 300, `1m` 1800, and the
+
+            unbounded `max`/`all` 43200).
+
+
+            SEND it and it is served exactly as asked, which for a window older
+            than
+
+            that resolution's retention means an empty page rather than a silent
+
+            substitution. An explicit value is also floored per interval: 600
+            for
+
+            `max`/`all`/`1m`, 300 for `1w`.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: as_of
+          in: query
+          description: >-
+            Point-in-time read, epoch seconds, INCLUSIVE: the latest observation
+            at
+
+            or before this instant. Cannot be combined with a window. `asOf` is
+            an
+
+            accepted alias.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: limit
+          in: query
+          description: >-
+            First-page size; defaults to the cap (10,000). Ignored when `cursor`
+            is
+
+            supplied (the cursor's size wins).
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 10000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of the price-history series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricesHistoryPage"
+        "400":
+          description: Invalid query params or cursor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Per-client rate limit; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out at the Timescale statement timeout, no pooled connection
+            within the acquire budget, or the reader is unavailable; retry after
+            `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/resolutions:
+    get:
+      tags:
+        - markets
+      summary: Get resolution state
+      description: >-
+        Complete resolution state by one selector family.
+
+
+        Supply exactly one of `question_id`, `condition`, or `event_id`.
+        Condition and
+
+        event selectors accept comma-separated values and return condition-grain
+
+        rows in deterministic order, preferring native V2 lifecycle, then UMA
+
+        lifecycle, then terminal CTF state. Misses return `{ "data": [] }`.
+      operationId: get_resolutions
+      parameters:
+        - name: question_id
+          in: query
+          description: One UMA question identifier (`0x` plus 64 hexadecimal characters).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: condition
+          in: query
+          description: Comma-separated Gamma condition identifiers (at most 20 distinct
+            values).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: event_id
+          in: query
+          description: Comma-separated positive Gamma event IDs (at most 20 distinct
+            values).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: Resolution rows for the selected question, markets, or events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Vec_ResolutionWithSettlementTime"
+        "400":
+          description: Missing, mixed, empty, or invalid selector
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/status:
+    get:
+      tags:
+        - service
+      summary: Get data freshness
+      description: >-
+        How fresh the data behind this API is.
+
+
+        `/readyz` answers whether this pod can reach its datastore; this answers
+        how
+
+        far behind chain head what you are reading is. Two halves, because each
+        is
+
+        blind exactly where the other sees:
+
+
+        * `serving`; the projections that turn ingested rows into what the feeds
+          read (`activity_feed` enrichment, `custody_balances` ingestion, the PnL
+          engine).
+          Each carries its own clock, so this is the only half that can see
+          "everything stopped". `lag_seconds` is the worst age across them and
+          `worst` names which one, so a single stalled projection cannot hide behind
+          two healthy ones.
+        * `ingestion`; one crawl cursor per `(contract, event)`, summarised as
+        the
+          tail, the furthest-behind block, and the worst few cursors BY NAME. Every
+          reading here is relative or positional, so under a total stall it reads
+          green; that is why `serving` exists alongside it.
+
+        Streams that are dormant by design are dropped from `ingestion` rather
+        than
+
+        reported, because they sit arbitrarily far back forever and would
+        otherwise
+
+        fill the list and push the stream you care about off it.
+
+
+        Takes no parameters and is not paginated. Served from a snapshot
+        refreshed
+
+        in the background, never computed on the request: `computed_at` and
+
+        `age_seconds` say how old it is, so a stalled refresher or a datastore
+
+        outage shows up as a growing age rather than a 500. Before the first
+        refresh
+
+        lands there is nothing to serve and this answers `503`; "not measured
+        yet"
+
+        and "measured, no lag" are different claims.
+      operationId: get_status
+      responses:
+        "200":
+          description: Serving and ingestion freshness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_ServiceStatus"
+        "503":
+          description: No freshness measured yet, a timeout, or a serving dependency
+            outage; retry after `Retry-After` when present
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/trades:
+    get:
+      tags:
+        - feeds
+      summary: List trades
+      description: >-
+        Keyset-paginated trade feed in the standard
+
+        `{ data, pagination }` envelope.
+
+
+        Pass `?cursor=` from a prior response's `next_cursor` to fetch the next
+        page;
+
+        it carries both the page size and the `(block_timestamp, sequence_id)`
+        seek
+
+        anchor, so deep pages cost the same as shallow ones.
+
+
+        A malformed `condition` id is a `400` naming the value; a
+
+        well-formed one that matches nothing serves an empty `data` array, which
+
+        is the meaningful zero-state; absence means the market is not servable,
+
+        and only that.
+      operationId: get_trades
+      parameters:
+        - name: user
+          in: query
+          description: Address to filter by; omit for the market/event/global feed.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: limit
+          in: query
+          description: First-page size. Ignored when `cursor` is supplied (the cursor's
+            size wins).
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int32
+            maximum: 1000
+            minimum: 0
+        - name: cursor
+          in: query
+          description: Opaque pagination cursor from a prior response's `next_cursor`.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: taker_only
+          in: query
+          description: |-
+            Defaults to `true`: each fill is served once, on its taker side.
+            `false` includes the maker rows too.
+          required: false
+          schema:
+            type:
+              - boolean
+              - "null"
+        - name: filter_type
+          in: query
+          description: CASH or TOKENS; defaults to TOKENS.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: filter_amount
+          in: query
+          description: Minimum trade size; defaults to 0.01, and 0 means the same.
+          required: false
+          schema:
+            type:
+              - number
+              - "null"
+            format: double
+        - name: start
+          in: query
+          description: >-
+            Window start on `block_timestamp`, epoch seconds (inclusive);
+            honored
+
+            on the `user` shape only. Omitted or `0` floors to three years back;
+
+            `start=1` asks for full history. The `condition`/`event_id` shapes
+
+            serve a fixed three-year window and the bare feed the rolling
+
+            current-plus-previous month, ignoring both bounds.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: end
+          in: query
+          description: |-
+            Window end, epoch seconds (inclusive); honored on the `user` shape
+            only; omitted or `0` means now plus one day.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: condition
+          in: query
+          description: |-
+            Condition id(s), comma-separated (at most 20 distinct values).
+            `condition_id` / `conditionId` are accepted aliases.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: event_id
+          in: query
+          description: Event id(s), comma-separated (at most 20 distinct values).
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: side
+          in: query
+          description: BUY or SELL.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: A page of trades
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradesPage"
+        "400":
+          description: Invalid query params or cursor, a malformed 'condition' id, or a
+            'user' that is a known protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/user-pnl:
+    get:
+      tags:
+        - wallet
+      summary: Get a user's PnL series
+      description: Complete cumulative native-PnL atoms and compositions.
+      operationId: get_user_pnl_v2
+      parameters:
+        - name: user
+          in: query
+          description: Proxy wallet. The `user_address` spelling is accepted as an alias.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: interval
+          in: query
+          description: "Window: `max`, `all`, `1m`, `1w`, `1d`, `12h`, or `6h`. Defaults
+            to `1d`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: fidelity
+          in: query
+          description: "Output grid: `1d`, `18h`, `12h`, `3h`, or `1h`. Defaults to `1h`."
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: Cumulative user-PnL series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_UserPnlSeries"
+        "400":
+          description: Invalid wallet, interval, or fidelity, including a wallet that is a
+            known protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/user-stats:
+    get:
+      tags:
+        - wallet
+      summary: Get a user's profile stats
+      description: >-
+        The profile card for one wallet in a single call.
+
+
+        `?user=` is required. Returns `{ data: { trades, biggest_win, views,
+
+        join_date, all_time_pnl } }`, or `{ data: null }` when the wallet is not
+        a
+
+        known user.
+
+
+        **`data: null` and a row of zeros mean different things.** `null` is "no
+        such
+
+        user"; zeros are "this user exists but has never traded, never won and
+        has no
+
+        profile views".
+
+
+        `trades` counts DISTINCT MARKETS traded, not individual trades. It is
+        exact,
+
+        not estimated.
+
+
+        `biggest_win` is the best single **resolved** position win in USDC,
+        market
+
+        and combo arms unified, and `0` when the wallet has no win over $1.
+
+
+        `join_date` is epoch seconds, or `null` when unknown.
+
+
+        `all_time_pnl` is the newest persisted cumulative `/v2/user-pnl` point
+        at
+
+        its actual observation timestamp. It is `null` when the user exists but
+        no
+
+        observation has been published yet. For the composition card: trading
+
+        realized is `realized_market_pnl + realized_combo_pnl`; LP realized is
+
+        `realized_lp_pnl`; rebates, yield, rewards, referral, and fees paid map
+        to
+
+        their same-named fields (`fees_paid` is refunds minus charges).
+        `volume`,
+
+        `volume_usdc`, and `trade_count` are cumulative maker-attributed
+        canonical
+
+        fill metrics.
+
+
+        Not paginated: one row by construction, so `data` is the bare object
+        with no
+
+        `pagination`; the `/v2/value` shape.
+      operationId: get_user_stats
+      parameters:
+        - name: user
+          in: query
+          description: |-
+            The wallet whose profile stats to return. Required; `0x` followed by
+            40 hexadecimal characters.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: The wallet's profile stats, or null when it is not a known user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Option_UserStats"
+        "400":
+          description: Missing or invalid 'user' address, or a 'user' that is a known
+            protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/user-volume:
+    get:
+      tags:
+        - wallet
+      summary: Get a user's trading volume
+      description: >-
+        One wallet's trading volume over a window, in both
+
+        units side by side.
+
+
+        `?user=` is required. `?start=` / `?end=` are epoch seconds, inclusive
+        and
+
+        optional: omitted or `0` disables a bound (full history). Volume is
+        tracked in
+
+        whole UTC days, so each bound is floored to its UTC day; the served
+        window
+
+        is the smallest whole-day window containing `[start, end]`.
+
+
+        Returns `{ data: { volume, volume_usdc, trade_count } }`; exactly one
+        row
+
+        by construction (the view aggregates with no GROUP BY), zeros for a
+        wallet
+
+        with no trades in the window. An inverted window is zeros too, not an
+        error.
+
+
+        `volume` is both-sides SHARES; `volume_usdc` is the same measure in USD;
+
+        the endpoint that shows the unit convention side by side: the bare name
+        is
+
+        the natural unit, `_usdc` is the denomination, the same pairing as
+
+        `current_size` / `entry_cost_usdc` on `/v2/positions`.
+      operationId: get_user_volume
+      parameters:
+        - name: user
+          in: query
+          description: The wallet whose volume to return. Required.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: start
+          in: query
+          description: >-
+            Window start, epoch seconds, inclusive. Omitted or `0` disables the
+
+            bound (the feeds' convention). Volume is tracked in whole UTC days,
+            so
+
+            the bound is floored to its UTC day.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+        - name: end
+          in: query
+          description: >-
+            Window end, epoch seconds, inclusive, floored to its UTC day.
+            Omitted
+
+            or `0` disables the bound.
+          required: false
+          schema:
+            type:
+              - integer
+              - "null"
+            format: int64
+      responses:
+        "200":
+          description: "The wallet's volume over the window: both-sides shares, the same
+            measure in USD, and the trade count"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_UserVolume"
+        "400":
+          description: Missing or empty 'user', or a 'user' that is a known protocol
+            contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many requests; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/value:
+    get:
+      tags:
+        - wallet
+      summary: Get portfolio value
+      description: >-
+        The user's portfolio value: single-market holdings marked to market plus
+
+        unresolved combo positions at cost basis.
+
+
+        `?user=` is required (400 otherwise). `?condition=` (CSV of
+        `condition_id`)
+
+        scopes the single-market term, and any condition filter excludes the
+
+        portfolio-level combo term. `data` is a single object; a user
+
+        with no positions yields `{ "data": { "proxy_wallet": …, "value": 0 }
+        }`.
+      operationId: get_value
+      parameters:
+        - name: user
+          in: query
+          description: The wallet whose portfolio value to return. Required.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+        - name: condition
+          in: query
+          description: >-
+            Comma-separated `condition_id`s (at most 20 distinct values); omit
+            for
+
+            the full portfolio.
+          required: false
+          schema:
+            type:
+              - string
+              - "null"
+      responses:
+        "200":
+          description: Portfolio value for the user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_PortfolioValue"
+        "400":
+          description: Missing or empty 'user', a malformed 'condition' id, or a 'user'
+            that is a known protocol contract address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Service is at heavy-query capacity; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: Timed out (the request deadline, the datastore statement timeout,
+            or the connection pool's acquire budget) or a serving dependency is
+            unavailable; retry after `Retry-After`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    Activity:
+      type: object
+      description: One activity-feed event (`/v2/activity`); a trade, split, merge,
+        redeem, …
+      required:
+        - proxy_wallet
+        - timestamp
+        - condition_id
+        - type
+        - size
+        - usdc_size
+        - transaction_hash
+        - price
+        - token_id
+        - side
+        - outcome_index
+        - title
+        - slug
+        - icon
+        - event_slug
+        - outcome
+        - name
+        - pseudonym
+        - bio
+        - profile_image
+        - profile_image_optimized
+      properties:
+        bio:
+          type: string
+          description: Profile bio text.
+        condition_id:
+          type: string
+          description: On-chain condition id of the market (`0x` hex).
+        event_slug:
+          type: string
+          description: Parent event slug.
+        icon:
+          type: string
+          description: Market icon URL.
+        is_combo:
+          type: boolean
+          description: >-
+            Flag only, on V2/V3 combo trade rows. Combo detail lives on the
+            combos
+
+            endpoints; omitted from non-combo rows.
+        name:
+          type: string
+          description: Profile display name of the wallet.
+        outcome:
+          type: string
+          description: Label of the outcome (e.g. `Yes`).
+        outcome_index:
+          type: integer
+          format: int32
+          description: |-
+            Index of the outcome within the market; `999` means the outcome
+            could not be labeled.
+        price:
+          type: number
+          format: double
+          description: Price per share in USDC (trades; `0` where no price applies).
+        profile_image:
+          type: string
+          description: Profile image URL.
+        profile_image_optimized:
+          type: string
+          description: Resized profile image URL, when one exists.
+        proxy_wallet:
+          type: string
+          description: |-
+            Proxy wallet the row belongs to; the address every wallet-keyed
+            endpoint accepts as `user`.
+        pseudonym:
+          type: string
+          description: Generated fallback handle for profiles without a display name.
+        side:
+          type: string
+          description: |-
+            `BUY` or `SELL` on trade rows, from this wallet's perspective; empty
+            where a side does not apply.
+        size:
+          type: number
+          format: double
+          description: Share quantity of the action; bare sizes are shares, never USD.
+        slug:
+          type: string
+          description: Market slug; the URL segment on polymarket.com.
+        timestamp:
+          type: integer
+          format: int64
+          description: Block timestamp of the action, epoch seconds.
+        title:
+          type: string
+          description: Market question title (Gamma enrichment; empty when unenriched).
+        token_id:
+          type: string
+          description: CLOB asset id of the outcome token the action touched.
+        transaction_hash:
+          type: string
+          description: Hash of the settling transaction.
+        type:
+          type: string
+          description: TRADE, SPLIT, MERGE, REDEEM, REWARD, CONVERSION, …
+        usdc_size:
+          type: number
+          format: double
+          description: Cash value of the action in USDC.
+    ActivityPage:
+      type: object
+      description: "`{ data, pagination }` envelope for `/v2/activity`."
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Activity"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    ApprovalContract:
+      type: object
+      description: One trusted approval contract in the public response.
+      required:
+        - id
+        - feature
+        - token
+        - spender
+        - standard
+        - approved
+      properties:
+        amount:
+          type:
+            - string
+            - "null"
+          description: |-
+            Current ERC20 allowance: `max` for an unlimited grant, else the raw
+            integer amount as a string; absent on ERC1155 operator approvals
+            (all-or-nothing).
+        approved:
+          type: boolean
+          description: Whether the wallet currently grants this approval.
+        feature:
+          type: string
+          description: The product flow the approval enables (e.g. `trading`).
+        id:
+          type: string
+          description: Catalog identifier of this approval pair (token + spender).
+        spender:
+          type: string
+          description: The contract approved to spend or operate the token.
+        standard:
+          type: string
+          description: "Token standard of the pair: `ERC20` or `ERC1155`."
+        token:
+          type: string
+          description: The token contract the approval is granted on.
+    Approvals:
+      type: object
+      description: Non-paginated approval snapshot for one Polygon proxy wallet.
+      required:
+        - address
+        - chain_id
+        - checked_at
+        - contracts
+      properties:
+        address:
+          type: string
+          description: The checked wallet.
+        chain_id:
+          type: integer
+          format: int32
+          description: EVM chain id the state was read on (137 = Polygon).
+        checked_at:
+          type: string
+          description: When the on-chain state was read, RFC3339 UTC (20-second server
+            cache).
+        contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalContract"
+          description: One row per catalog pair the wallet may need.
+    BiggestWinner:
+      type: object
+      description: >-
+        One `/v2/biggest-winners` row: a single winning POSITION, not a user
+        total.
+
+
+        `kind` is `market` or `combo`. Combo rows carry a `' / '`-joined title
+        of
+
+        their legs and have no Gamma event; `event_id` is `0` and `event_slug`
+        is
+
+        empty; so branch on `kind` before building an event link.
+      required:
+        - win_rank
+        - kind
+        - user_id
+        - pnl
+        - initial_value
+        - final_value
+        - resolved_at
+        - condition_id
+        - position_id
+        - event_id
+        - event_slug
+        - event_title
+        - user_name
+        - profile_image
+      properties:
+        condition_id:
+          type: string
+          description: "On-chain condition id of the market (combo rows: the combo
+            condition)."
+        event_id:
+          type: integer
+          format: int32
+          description: Gamma event id of the parent event; `0` on combo rows.
+        event_slug:
+          type: string
+          description: Parent event slug; empty on combo rows.
+        event_title:
+          type: string
+          description: Parent event title; on combo rows, the `' / '`-joined leg questions.
+        final_value:
+          type: number
+          format: double
+          description: Value at resolution, in USDC.
+        initial_value:
+          type: number
+          format: double
+          description: Cost basis of the winning position, in USDC.
+        kind:
+          type: string
+          description: |-
+            `market` or `combo`; combo rows carry no Gamma event (`event_id` 0,
+            empty `event_slug`), so branch on this before building event links.
+        pnl:
+          type: number
+          format: double
+          description: "`final_value - initial_value`, in USDC."
+        position_id:
+          type: string
+          description: Token id of the winning position.
+        profile_image:
+          type: string
+          description: Profile image URL.
+        resolved_at:
+          type: integer
+          format: int64
+          description: Unix seconds; when the position resolved.
+        user_id:
+          type: string
+          description: The winning wallet.
+        user_name:
+          type: string
+          description: Profile display name of the wallet.
+        win_rank:
+          type: integer
+          format: int32
+          description: >-
+            Unique 1-based ordinal within the window/category; `row_number()`,
+            so
+
+            equal PnL does not share a rank (unlike the leaderboard's `rank`).
+          minimum: 0
+    BiggestWinnersPage:
+      type: object
+      description: "`{ data, pagination }` envelope for `/v2/biggest-winners`."
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BiggestWinner"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    BuilderStanding:
+      type: object
+      description: >-
+        One `/v2/builders/leaderboard` row: a builder's standing for the window.
+
+
+        `volume` is in SHARES, not USDC; the same unit as `/v2/leaderboard`'s
+        `volume`.
+
+        `active_users` counts distinct makers in the window. `builder_name` is a
+
+        display name that falls back to `builder_code` when the builder has no
+
+        profile; `profile_image` is the avatar, the same spelling every payload
+
+        carrying one uses.
+      required:
+        - rank
+        - builder_name
+        - builder_code
+        - profile_image
+        - verified
+        - volume
+        - active_users
+      properties:
+        active_users:
+          type: integer
+          format: int64
+          description: Distinct active users attributed to the builder in the window.
+          minimum: 0
+        builder_code:
+          type: string
+          description: Stable identifier of the builder.
+        builder_name:
+          type: string
+          description: Builder display name; cosmetic; key on `builder_code`.
+        profile_image:
+          type: string
+          description: Builder profile image URL.
+        rank:
+          type: integer
+          format: int64
+          description: Board rank in the requested window; ties share a rank and the next
+            skips.
+          minimum: 0
+        verified:
+          type: boolean
+          description: Whether the builder is verified.
+        volume:
+          type: number
+          format: double
+          description: Volume attributed to the builder in the window, in shares.
+    BuilderVolumePoint:
+      type: object
+      description: >-
+        One `/v2/builders/volume` row: a builder's volume in ONE bucket of the
+
+        series, not a running total.
+
+
+        `date` is the bucket start (`YYYY-MM-DD`) and its width is the request's
+
+        `interval`; daily, weekly, monthly, or yearly for `all`. `rank` is the
+
+        builder's placing **within that bucket**, so it moves from bucket to
+        bucket.
+
+        `volume` is in SHARES, as on the leaderboard.
+      required:
+        - date
+        - rank
+        - builder_name
+        - builder_code
+        - profile_image
+        - verified
+        - volume
+        - active_users
+      properties:
+        active_users:
+          type: integer
+          format: int64
+          description: Distinct active users attributed in that bucket.
+          minimum: 0
+        builder_code:
+          type: string
+          description: Stable identifier of the builder.
+        builder_name:
+          type: string
+          description: Builder display name; cosmetic; key on `builder_code`.
+        date:
+          type: string
+          description: Bucket start date, `YYYY-MM-DD` (UTC); `interval` sets the width.
+        profile_image:
+          type: string
+          description: Builder profile image URL.
+        rank:
+          type: integer
+          format: int64
+          description: Builder's rank within that bucket.
+          minimum: 0
+        verified:
+          type: boolean
+          description: Whether the builder is verified.
+        volume:
+          type: number
+          format: double
+          description: Volume attributed in that bucket, in shares.
+    BuildersLeaderboardPage:
+      type: object
+      description: |-
+        `{ data, pagination }` envelope for `/v2/builders/leaderboard`; an
+        offset-cursor board, like `LeaderboardPage`. Its companion
+        `/v2/builders/volume` is a series rather than a board and is NOT paged.
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuilderStanding"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    ComboActivity:
+      type: object
+      description: |-
+        One combo lifecycle/redemption event (`/v2/activity/combos`).
+
+        Ordered and paginated by on-chain position; `(block_number, log_index)`.
+        `timestamp` is the event's wall-clock, not the ordering key.
+      required:
+        - id
+        - type
+        - proxy_wallet
+        - combo_condition_id
+        - combo_position_id
+        - block_number
+        - timestamp
+        - transaction_hash
+        - legs
+      properties:
+        amount_usdc:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Cash amount of the action in USDC; `null` where no cash leg applies.
+        block_number:
+          type: integer
+          format: int64
+          description: Block number of the action.
+        combo_condition_id:
+          type: string
+          description: On-chain combo condition id (structural, `0x03`-prefixed).
+        combo_position_id:
+          type: string
+          description: Token id of the combo position the action touched.
+        id:
+          type: string
+          description: "`tx_hash-log_index`."
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboLeg"
+          description: The combo's legs, in leg order, with market and event enrichment.
+        payout_usdc:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Redemption payout in USDC on REDEEM rows; `null` otherwise.
+        proxy_wallet:
+          type: string
+          description: Proxy wallet the action belongs to.
+        timestamp:
+          type: integer
+          format: int64
+          description: Event time (epoch seconds).
+        transaction_hash:
+          type: string
+          description: Hash of the settling transaction.
+        type:
+          type: string
+          description: >-
+            Canonical action verb; SPLIT / MERGE / CONVERT / COMPRESS / WRAP /
+
+            UNWRAP / REDEEM. The only action field on the wire; `timestamp` is
+            the
+
+            served event clock.
+    ComboActivityPage:
+      type: object
+      description: "`{ data, pagination }` envelope for `/v2/activity/combos`."
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboActivity"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    ComboLeg:
+      type: object
+      description: One leg of a combo, with its market and event enrichment.
+      required:
+        - leg_index
+        - leg_position_id
+        - leg_condition_id
+        - leg_outcome_index
+        - leg_outcome_label
+        - leg_status
+        - leg_current_price
+        - market
+      properties:
+        leg_condition_id:
+          type: string
+          description: On-chain condition id of the leg's market.
+        leg_current_price:
+          type: number
+          format: double
+          description: Live price of the leg outcome (Gamma marks).
+        leg_index:
+          type: integer
+          format: int32
+          description: Position of the leg within the combo, 0-based.
+        leg_outcome_index:
+          type: integer
+          format: int32
+          description: |-
+            Index of the outcome the combo takes on this leg; `999` means the
+            outcome could not be labeled.
+        leg_outcome_label:
+          type: string
+          description: Label of the outcome the combo takes on this leg.
+        leg_position_id:
+          type: string
+          description: Outcome token id of the leg.
+        leg_resolved_at:
+          type:
+            - string
+            - "null"
+          description: Gamma `closed_time`, RFC3339; `null` while open.
+        leg_status:
+          type: string
+          description: OPEN / RESOLVED_WIN / RESOLVED_LOSS (live resolution state).
+        market:
+          $ref: "#/components/schemas/ComboLegMarket"
+          description: The leg's market, with its (single) event nested.
+    ComboLegEvent:
+      type: object
+      description: A leg market's event.
+      required:
+        - event_id
+        - event_slug
+        - event_title
+        - event_image
+      properties:
+        event_id:
+          type: string
+          description: Gamma event id.
+        event_image:
+          type: string
+          description: Event image URL.
+        event_slug:
+          type: string
+          description: Event slug; the URL segment on polymarket.com.
+        event_title:
+          type: string
+          description: Event title.
+    ComboLegMarket:
+      type: object
+      description: A leg's market, with its (single) event nested.
+      required:
+        - market_id
+        - slug
+        - title
+        - outcome
+        - image_url
+        - icon_url
+        - category
+        - subcategory
+        - tags
+        - end_date
+        - event
+      properties:
+        category:
+          type: string
+          description: Gamma market category (e.g. `sports`).
+        end_date:
+          type: string
+          description: Market end date, RFC3339; empty when Gamma has none.
+        event:
+          $ref: "#/components/schemas/ComboLegEvent"
+          description: The market's parent event.
+        group_item_title:
+          type: string
+          description: |-
+            Raw short per-leg label, without the fallback `title` applies; `""`
+            when Gamma has none.
+        icon_url:
+          type: string
+          description: Market icon URL.
+        image_url:
+          type: string
+          description: Market image URL.
+        line:
+          type:
+            - number
+            - "null"
+          format: double
+          description: The sports line the market is quoted on; `null` when it has none.
+        market_id:
+          type: string
+          description: |-
+            Gamma's own market id; NOT the on-chain condition id (that is the
+            leg's `leg_condition_id`).
+        outcome:
+          type: string
+          description: Label of the leg's outcome on this market.
+        outcomes:
+          type: array
+          items:
+            type: string
+          description: >-
+            The market's outcome labels, in outcome-index order; `[]` when Gamma
+
+            has none. Together with `sports_market_type` and `line`, this lets
+            an
+
+            executed combo card render both sides of a leg without a Gamma
+            lookup.
+        question:
+          type: string
+          description: |-
+            The market's full question. Serves `""` when Gamma has none.
+
+            The five display-metadata fields below default when absent so cached
+            payloads written before they existed still deserialize; the query
+            always serves them.
+        slug:
+          type: string
+          description: Market slug; the URL segment on polymarket.com.
+        sports_market_type:
+          type: string
+          description: |-
+            Granular sports market type (for example `totals` or
+            `anytime_touchdowns`); `""` for non-sports markets.
+        subcategory:
+          type: string
+          description: Gamma market subcategory.
+        tags:
+          type: array
+          items:
+            type: string
+          description: Reserved; always `[]` today.
+        title:
+          type: string
+          description: Short per-leg label (`group_item_title`), falling back to the
+            question.
+    ComboPosition:
+      type: object
+      description: >-
+        One combo position (`/v2/positions/combos`); a user's holding in a
+        single
+
+        combo outcome, with leg rollups and enrichment.
+
+
+        Paginated on `(first_entry_at_micros, combo_condition_id,
+        outcome_index)`;
+
+        follow the response's `next_cursor` rather than rebuilding that triple.
+      required:
+        - combo_condition_id
+        - outcome_index
+        - outcome_label
+        - combo_position_id
+        - proxy_wallet
+        - current_size
+        - entry_avg_price_usdc
+        - entry_cost_usdc
+        - gross_entry_cost_usdc
+        - entry_fees_usdc
+        - realized_payout_usdc
+        - status
+        - redeemable
+        - first_entry_at
+        - legs_total
+        - legs_resolved
+        - legs_pending
+        - legs
+        - updated_at
+        - updated_at_micros
+      properties:
+        combo_condition_id:
+          type: string
+          description: On-chain combo condition id (structural, `0x03`-prefixed).
+        combo_position_id:
+          type: string
+          description: Token id of the combo position.
+        current_size:
+          type: number
+          format: double
+          description: Current holding in shares.
+        entry_avg_price_usdc:
+          type: number
+          format: double
+          description: Weighted-average entry price per share, in USDC.
+        entry_cost_usdc:
+          type: number
+          format: double
+          description: Entry cost basis in USDC (rounded weighted-average form).
+        entry_fees_usdc:
+          type: number
+          format: double
+          description: >-
+            Attributed BUY-fee portion of `gross_entry_cost_usdc`, 6-decimal
+            grain.
+
+            SELL fees are exit costs and are excluded.
+        first_entry_at:
+          type: string
+          description: First acquisition time, RFC3339.
+        first_entry_at_micros:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: Epoch-micros of `first_entry_at`; `null`/absent on the NULL tail.
+        gross_entry_cost_usdc:
+          type: number
+          format: double
+          description: >-
+            Exact fee-inclusive entry basis at 6-decimal grain; formatting to 6
+            dp
+
+            recovers the stored value. Do NOT reconstruct it as
+
+            `entry_cost_usdc + entry_fees_usdc`; `entry_cost_usdc` is rounded
+            WAC;
+
+            the fee-exclusive basis is `gross_entry_cost_usdc −
+            entry_fees_usdc`.
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboLeg"
+          description: The combo's legs, in leg order, with market and event enrichment.
+        legs_pending:
+          type: integer
+          format: int32
+          description: Legs still awaiting resolution.
+        legs_resolved:
+          type: integer
+          format: int32
+          description: Legs whose markets have resolved.
+        legs_total:
+          type: integer
+          format: int32
+          description: Number of legs in the combo.
+        outcome_index:
+          type: integer
+          format: int32
+          description: Index of the combo outcome held; `999` means unlabelable.
+        outcome_label:
+          type: string
+          description: Label of the combo outcome held.
+        proxy_wallet:
+          type: string
+          description: |-
+            The holder's wallet. `proxy_wallet` on every /v2 response; `user` is
+            the REQUEST param vocabulary, never a response field (2026-08-19).
+        realized_payout_usdc:
+          type: number
+          format: double
+          description: |-
+            Gross redemption payout received so far in USDC; turnover, not
+            profit; net result = payout minus `gross_entry_cost_usdc`.
+        redeemable:
+          type: boolean
+          description: Whether the combo can be redeemed now.
+        resolved_at:
+          type:
+            - string
+            - "null"
+          description: When the combo fully resolved, RFC3339; `null` while any leg is open.
+        status:
+          type: string
+          description: |-
+            Lifecycle state of the position (OPEN, REDEEMABLE, RESOLVED_WIN,
+            RESOLVED_LOSS, RESOLVED_PARTIAL).
+        updated_at:
+          type: string
+          description: Last event touching the position, RFC3339.
+        updated_at_micros:
+          type: integer
+          format: int64
+          description: Epoch-micros of `updated_at`.
+    ComboPositionsPage:
+      type: object
+      description: "`{ data, pagination }` envelope for `/v2/positions/combos`."
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComboPosition"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    ConditionVolume:
+      type: object
+      description: >
+        One `/v2/live-volume` row: `taker_volume` is the market's cumulative
+
+        one-side (taker) volume, truncated to 6 decimal places; qualified
+        because
+
+        the boards' `volume` is both-sides, and two measures must not share a
+        name.
+      required:
+        - condition_id
+        - taker_volume
+      properties:
+        condition_id:
+          type: string
+          description: On-chain condition id of the market (`0x` hex).
+        taker_volume:
+          type: number
+          format: double
+          description: Cumulative one-side (taker) volume in shares, truncated to 6
+            decimals.
+    CursorLag:
+      type: object
+      description: One ingestion stream's distance from the furthest-along stream.
+      required:
+        - source
+        - block
+        - behind_max
+      properties:
+        behind_max:
+          type: integer
+          format: int64
+          description: >-
+            How many blocks this stream trails the furthest-along stream; `0`
+            for
+
+            the leader.
+        block:
+          type: integer
+          format: int64
+          description: Last block the stream has ingested through.
+        source:
+          type: string
+          description: The stream this cursor belongs to, as `<contract>_<event>`.
+    Envelope_Approvals:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: Non-paginated approval snapshot for one Polygon proxy wallet.
+          required:
+            - address
+            - chain_id
+            - checked_at
+            - contracts
+          properties:
+            address:
+              type: string
+              description: The checked wallet.
+            chain_id:
+              type: integer
+              format: int32
+              description: EVM chain id the state was read on (137 = Polygon).
+            checked_at:
+              type: string
+              description: When the on-chain state was read, RFC3339 UTC (20-second server
+                cache).
+            contracts:
+              type: array
+              items:
+                $ref: "#/components/schemas/ApprovalContract"
+              description: One row per catalog pair the wallet may need.
+    Envelope_LiveVolume:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: >-
+            `/v2/live-volume`: one entry per market in the requested event(s),
+            ordered
+
+            by `taker_volume` descending, plus `taker_volume_total`; their sum.
+            Events
+
+            that resolve to no markets serve `{ taker_volume_total: 0.0,
+            conditions: [] }`.
+          required:
+            - taker_volume_total
+            - conditions
+          properties:
+            conditions:
+              type: array
+              items:
+                $ref: "#/components/schemas/ConditionVolume"
+              description: |-
+                One row per market under the requested event(s), `taker_volume`
+                descending; empty when the events resolve to no markets.
+            taker_volume_total:
+              type: number
+              format: double
+              description: Sum of the rows' `taker_volume`, in shares.
+    Envelope_Option_LeaderboardUserEntry:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          oneOf:
+            - type: "null"
+            - type: object
+              description: >-
+                `/v2/leaderboard?user=`; one user's standing, carrying BOTH
+                ranks.
+
+
+                The ranked board is materialised per sort, so it can only answer
+                "where does
+
+                this user place by PnL" or "by volume", one at a time. This
+                shape comes from
+
+                the by-user pivot instead and answers both at once.
+
+
+                A `null` rank means **unranked** for that sort: the user exists
+                in the pivot
+
+                but is filtered out of that board.
+              required:
+                - user_id
+                - pnl
+                - volume
+                - user_name
+                - profile_image
+                - x_username
+                - verified
+              properties:
+                pnl:
+                  type: number
+                  format: double
+                  description: >-
+                    Window PnL in USDC, same semantics as the board rows (finite
+                    windows
+
+                    marked, `all` realized-only).
+                profile_image:
+                  type: string
+                  description: Profile image URL.
+                rank_pnl:
+                  type:
+                    - integer
+                    - "null"
+                  format: int32
+                  description: "`None` when unranked on the PnL board."
+                  minimum: 0
+                rank_volume:
+                  type:
+                    - integer
+                    - "null"
+                  format: int32
+                  description: "`None` when unranked on the volume board."
+                  minimum: 0
+                user_id:
+                  type: string
+                  description: The looked-up wallet.
+                user_name:
+                  type: string
+                  description: Profile display name of the wallet.
+                verified:
+                  type: boolean
+                  description: Profile verification badge.
+                volume:
+                  type: number
+                  format: double
+                  description: Both-sides traded volume in shares; never USD.
+                x_username:
+                  type: string
+                  description: Linked X handle, when one exists.
+    Envelope_Option_UserStats:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          oneOf:
+            - type: "null"
+            - type: object
+              description: >-
+                The profile card for one wallet, plus its newest persisted
+                all-time PnL
+
+                observation.
+
+
+                `join_date` is `null` when unknown, which is a real state rather
+                than an
+
+                error; a meaningful share of accounts have no recorded creation
+                time.
+
+                `biggest_win` is `0` when the wallet has no win over $1.
+                `all_time_pnl` is
+
+                `null` when the user is known but has no observation yet; a
+                missing user is
+
+                represented by the outer response `data: null` instead.
+              required:
+                - proxy_wallet
+                - trades
+                - biggest_win
+                - views
+              properties:
+                all_time_pnl:
+                  oneOf:
+                    - type: "null"
+                    - $ref: "#/components/schemas/UserPnlPoint"
+                      description: Newest persisted cumulative all-time PnL point, or `null` when
+                        absent.
+                biggest_win:
+                  type: number
+                  format: double
+                  description: Largest single resolved win, in USDC.
+                join_date:
+                  type:
+                    - integer
+                    - "null"
+                  format: int64
+                  description: Epoch seconds, or `null` when the join date is unknown.
+                proxy_wallet:
+                  type: string
+                  description: The proxy wallet these lifetime statistics describe.
+                trades:
+                  type: integer
+                  format: int64
+                  description: Distinct markets the wallet traded; an exact count.
+                  minimum: 0
+                views:
+                  type: integer
+                  format: int64
+                  description: Profile view count.
+                  minimum: 0
+    Envelope_PortfolioValue:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: >-
+            `/v2/value`: the user's portfolio value; single-market holdings
+            marked to
+
+            market plus unresolved combo positions at cost basis, rounded to 4
+            decimals. Always
+
+            exactly one row; a user with no positions returns `{ proxy_wallet,
+            value: 0 }`.
+          required:
+            - proxy_wallet
+            - value
+          properties:
+            proxy_wallet:
+              type: string
+              description: The wallet the value was computed for.
+            value:
+              type: number
+              format: double
+              description: >-
+                Portfolio value in USDC, rounded to 4 decimals: holdings marked
+                to
+
+                market plus non-terminal combos at cost basis.
+    Envelope_ServiceStatus:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: >-
+            `/v2/status` payload.
+
+
+            Served from a snapshot refreshed in the background, never computed
+            on the
+
+            request. `computed_at`/`age_seconds` make that explicit rather than
+            implicit:
+
+            if the refresher wedges or its datastore goes away, the answer keeps
+            being
+
+            served with a growing age instead of turning into a 500; the right
+            degraded
+
+            mode for the endpoint you call when something is already wrong.
+          required:
+            - computed_at
+            - age_seconds
+            - serving
+            - ingestion
+          properties:
+            age_seconds:
+              type: integer
+              format: int64
+              description: >-
+                How old the snapshot is, in seconds. Normally under the refresh
+
+                interval; a value that keeps climbing means the refresher is not
+
+                completing, and the freshness figures below are that stale ON
+                TOP of
+
+                whatever lag they report.
+            computed_at:
+              type: string
+              description: When this snapshot was taken, RFC 3339 in UTC.
+            ingestion:
+              $ref: "#/components/schemas/IngestionFreshness"
+            serving:
+              $ref: "#/components/schemas/ServingFreshness"
+    Envelope_UserPnlSeries:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: Complete v2 user-PnL response data.
+          required:
+            - proxy_wallet
+            - interval
+            - fidelity
+            - source_fidelity
+            - points
+          properties:
+            fidelity:
+              type: string
+              description: Grid step the points were synthesized on (`1d`, `18h`, `12h`, `3h`,
+                `1h`).
+            interval:
+              type: string
+              description: The window served (`max`, `all`, `1m`, `1w`, `1d`, `12h`, `6h`).
+            points:
+              type: array
+              items:
+                $ref: "#/components/schemas/UserPnlPoint"
+              description: Dense cumulative points on the requested grid, oldest first.
+            proxy_wallet:
+              type: string
+              description: The wallet the series was computed for.
+            source_fidelity:
+              type: string
+              description: Historical MVP observations are daily even when carried onto a
+                finer grid.
+    Envelope_UserVolume:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          description: >-
+            `/v2/user-volume`: one wallet's trading volume over a whole-day
+            window, in
+
+            both units side by side.
+
+
+            `volume` is both-sides SHARES; `volume_usdc` is the same measure in
+            USD;
+
+            the bare name is the natural unit and `_usdc` is the denomination,
+            the same
+
+            pairing as `current_size` / `entry_cost_usdc` on `/v2/positions`.
+
+            `trade_count` is the number of trades in the window.
+          required:
+            - volume
+            - volume_usdc
+            - trade_count
+          properties:
+            trade_count:
+              type: integer
+              format: int64
+              description: Number of fills in the window.
+              minimum: 0
+            volume:
+              type: number
+              format: double
+              description: Both-sides traded volume over the window, in shares.
+            volume_usdc:
+              type: number
+              format: double
+              description: Both-sides cash volume over the window, in USD.
+    Envelope_Vec_BuilderVolumePoint:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            description: >-
+              One `/v2/builders/volume` row: a builder's volume in ONE bucket of
+              the
+
+              series, not a running total.
+
+
+              `date` is the bucket start (`YYYY-MM-DD`) and its width is the
+              request's
+
+              `interval`; daily, weekly, monthly, or yearly for `all`. `rank` is
+              the
+
+              builder's placing **within that bucket**, so it moves from bucket
+              to bucket.
+
+              `volume` is in SHARES, as on the leaderboard.
+            required:
+              - date
+              - rank
+              - builder_name
+              - builder_code
+              - profile_image
+              - verified
+              - volume
+              - active_users
+            properties:
+              active_users:
+                type: integer
+                format: int64
+                description: Distinct active users attributed in that bucket.
+                minimum: 0
+              builder_code:
+                type: string
+                description: Stable identifier of the builder.
+              builder_name:
+                type: string
+                description: Builder display name; cosmetic; key on `builder_code`.
+              date:
+                type: string
+                description: Bucket start date, `YYYY-MM-DD` (UTC); `interval` sets the width.
+              profile_image:
+                type: string
+                description: Builder profile image URL.
+              rank:
+                type: integer
+                format: int64
+                description: Builder's rank within that bucket.
+                minimum: 0
+              verified:
+                type: boolean
+                description: Whether the builder is verified.
+              volume:
+                type: number
+                format: double
+                description: Volume attributed in that bucket, in shares.
+    Envelope_Vec_OpenInterest:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            description: >-
+              One `/v2/oi` row: the **priced gross** open interest of a market;
+
+              `Σ ((shares − fee_receiver_shares)/1e6 · outcome_price)` across
+              every
+
+              outcome, with no netting. `condition_id` is the market's on-chain
+              condition; the
+
+              global shape carries `condition_id = "GLOBAL"`.
+            required:
+              - condition_id
+              - value
+            properties:
+              condition_id:
+                type: string
+                description: >-
+                  Condition id the row answers for; `GLOBAL` on the
+                  parameterless
+
+                  global figure.
+              value:
+                type: number
+                format: double
+                description: Priced gross open interest in USDC; `0.0` when nothing is held.
+    Envelope_Vec_ResolutionWithSettlementTime:
+      type: object
+      description: >-
+        `{ "data": T }`; the envelope for endpoints that don't paginate.
+
+
+        There is no `pagination` key: an aggregate or bounded list has no next
+        page.
+
+        Paginated feeds return a `*Page` shape (`{ data, pagination }`) instead.
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/Resolution"
+              - type: object
+                properties:
+                  settlement_time_basis:
+                    type:
+                      - string
+                      - "null"
+                    description: "`managed_proposal_expiration`, `liveness`, or
+                      `dvm_round_estimate`."
+            description: >-
+              Existing shared resolution fields plus the source of a derived
+              estimate.
+
+              The flattened shape keeps `/v2/resolutions` compatible with
+              existing clients.
+    ErrorCode:
+      type: string
+      description: Stable machine-readable classification for Data API failures.
+      enum:
+        - invalid_request
+        - unauthorized
+        - not_found
+        - method_not_allowed
+        - request_timeout
+        - rate_limited
+        - dependency_unavailable
+        - internal
+    ErrorResponse:
+      type: object
+      description: Error body returned by Data API endpoints for unsuccessful requests.
+      required:
+        - error
+        - code
+        - retryable
+        - trace_id
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+          description: Stable classification suitable for programmatic branching.
+        error:
+          type: string
+          description: Human-readable error message.
+        parameter:
+          type:
+            - string
+            - "null"
+          description: Query or body parameter associated with a validation failure.
+        retryable:
+          type: boolean
+          description: Whether an automated consumer may retry the request unchanged.
+        trace_id:
+          type: string
+          description: Opaque identifier shared with structured logs and error telemetry.
+    Holder:
+      type: object
+      description: >-
+        One `/v2/holders` row: a market holder enriched with their public
+        profile,
+
+        netted across the market's outcome tokens by default or at per-side
+        gross
+
+        grain with the position economics when `include_pnl=true`.
+
+        `profile_image_optimized` is always empty.
+      required:
+        - proxy_wallet
+        - bio
+        - token_id
+        - pseudonym
+        - amount
+        - display_username_public
+        - outcome_index
+        - name
+        - profile_image
+        - profile_image_optimized
+        - verified
+      properties:
+        amount:
+          type: number
+          format: double
+          description: >-
+            Holding in shares. By default the NET figure (a fully hedged wallet
+
+            nets to `0.0` and only appears at `min_balance=0`); with
+
+            `include_pnl=true` the per-side GROSS figure, so each side of a
+            hedged
+
+            wallet appears under its own token with that side's full size.
+        avg_price:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Historical entry price per share. Served only with
+            `include_pnl=true`.
+        bio:
+          type: string
+          description: Profile bio text.
+        current_price:
+          type:
+            - number
+            - "null"
+          format: double
+          description: |-
+            Current price of the held outcome token, bounded to `[0, 1]`. Served
+            only with `include_pnl=true`.
+        current_value:
+          type:
+            - number
+            - "null"
+          format: double
+          description: >-
+            Mark value of the holding: `amount` times `current_price`. Served
+            only
+
+            with `include_pnl=true`.
+        display_username_public:
+          type: boolean
+          description: Whether the profile chose to show its name publicly.
+        entry_cost_usdc:
+          type:
+            - number
+            - "null"
+          format: double
+          description: >-
+            Cost basis of the held size in USDC, excluding entry fees. Served
+            only
+
+            with `include_pnl=true`.
+        name:
+          type: string
+          description: Profile display name of the wallet.
+        outcome_index:
+          type: integer
+          format: int32
+          description: Index of the held outcome within the market; `999` means unlabelable.
+        profile_image:
+          type: string
+          description: Profile image URL.
+        profile_image_optimized:
+          type: string
+          description: Resized profile image URL, when one exists.
+        proxy_wallet:
+          type: string
+          description: The holding wallet.
+        pseudonym:
+          type: string
+          description: Generated fallback handle for profiles without a display name.
+        realized_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: |-
+            Profit already locked in by sells and redemptions. Served only with
+            `include_pnl=true`.
+        token_id:
+          type: string
+          description: Outcome token held.
+        total_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: >-
+            Total profit and loss; always `realized_pnl + unrealized_pnl`.
+            Served
+
+            only with `include_pnl=true`.
+        unrealized_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: |-
+            Mark-to-market profit on the held size: `current_value` minus
+            `entry_cost_usdc`. Served only with `include_pnl=true`.
+        verified:
+          type: boolean
+          description: Profile verification badge.
+    HoldersPage:
+      type: object
+      description: |-
+        `{ data, pagination }` envelope for `/v2/holders`; an offset-cursor
+        feed (per outcome token): the offset lives behind the opaque token,
+        never on the wire.
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/MetaHolder"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    IngestionFreshness:
+      type: object
+      description: >-
+        Ingestion health: one cursor per `(contract, event)` stream.
+
+
+        Every figure here is over the LIVE streams only. Streams that are
+        dormant by
+
+        design sit arbitrarily far behind forever; they are dropped outright
+        rather
+
+        than reported and flagged, because there is nothing a consumer could do
+        with
+
+        them and including them is precisely what makes the list useless.
+      required:
+        - cursors
+        - chain_id
+        - lagging
+      properties:
+        chain_id:
+          type: integer
+          format: int64
+          description: >-
+            The chain id this service is configured for. Echoed so the pairing
+            above
+
+            is readable in one response.
+        cursors:
+          type: integer
+          description: |-
+            How many live streams were found. `0` means no ingestion cursors are
+            visible to this API at all.
+          minimum: 0
+        lagging:
+          type: array
+          items:
+            $ref: "#/components/schemas/CursorLag"
+          description: The furthest-behind live streams, `most_lagged` first.
+        max_synced_block:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: |-
+            The tail: the furthest-along cursor. Every `behind_max` is measured
+            against it, and so is each serving mechanism's `blocks_behind`.
+        min_synced_block:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: >-
+            The furthest-behind LIVE stream's block. Deliberately asymmetric
+            with
+
+            `max_synced_block` above, which is over ALL cursors: the tail must
+            not
+
+            move with the dormant cut, or excluding a stream would redefine the
+
+            distance every other stream is measured against.
+        most_lagged:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/CursorLag"
+              description: >-
+                The single furthest-behind live stream. A stall confined to one
+                stream
+
+                while every sibling sits at head is invisible in any aggregate
+                figure.
+        network:
+          type:
+            - string
+            - "null"
+          description: >-
+            The chain the ingestion cursors were written for, as the datastore
+
+            itself names it; NOT as this service is configured. Compared against
+
+            `chain_id`, it catches a datastore pointed at the wrong chain, which
+
+            otherwise presents as data that is merely wrong. `null` when no
+            stream
+
+            declares one.
+    LeaderboardEntry:
+      type: object
+      description: >-
+        One `/v2/leaderboard` row: a user's standing on the ranked board.
+
+
+        `pnl` is realized USDC over the window, base and combo positions
+        unified.
+
+        `volume` is both-sides SHARES, not USDC. `rank` is a competition
+
+        rank; tied users share one, and the next rank skips.
+      required:
+        - rank
+        - user_id
+        - pnl
+        - volume
+        - user_name
+        - profile_image
+        - x_username
+        - verified
+      properties:
+        pnl:
+          type: number
+          format: double
+          description: |-
+            Window PnL in USDC. Finite windows (day/week/month) are the MARKED
+            equity change net of flows; realized plus mark moves; `all` is the
+            realized-only lifetime ledger. The two deliberately differ.
+        profile_image:
+          type: string
+          description: Profile image URL.
+        rank:
+          type: integer
+          format: int32
+          description: Rank on the requested board; ties share a rank and the next skips.
+          minimum: 0
+        user_id:
+          type: string
+          description: The ranked wallet.
+        user_name:
+          type: string
+          description: Profile display name of the wallet.
+        verified:
+          type: boolean
+          description: Profile verification badge.
+        volume:
+          type: number
+          format: double
+          description: Both-sides traded volume in shares; never USD.
+        x_username:
+          type: string
+          description: Linked X handle, when one exists.
+    LeaderboardPage:
+      type: object
+      description: |-
+        `{ data, pagination }` envelope for `/v2/leaderboard`; an offset-cursor
+        board. `rank` ties and skips, so the offset behind the token is the only
+        sound way to page; never derive a page from a rank.
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeaderboardEntry"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    LeaderboardResponse:
+      oneOf:
+        - $ref: "#/components/schemas/LeaderboardPage"
+        - $ref: "#/components/schemas/Envelope_Option_LeaderboardUserEntry"
+      description: >-
+        Either arm's body. `?user=` answers with one standing; everything else
+        with
+
+        a page of the board; genuinely different shapes, so the spec says
+        `oneOf`
+
+        rather than pretending one covers both.
+    LeaderboardUserEntry:
+      type: object
+      description: >-
+        `/v2/leaderboard?user=`; one user's standing, carrying BOTH ranks.
+
+
+        The ranked board is materialised per sort, so it can only answer "where
+        does
+
+        this user place by PnL" or "by volume", one at a time. This shape comes
+        from
+
+        the by-user pivot instead and answers both at once.
+
+
+        A `null` rank means **unranked** for that sort: the user exists in the
+        pivot
+
+        but is filtered out of that board.
+      required:
+        - user_id
+        - pnl
+        - volume
+        - user_name
+        - profile_image
+        - x_username
+        - verified
+      properties:
+        pnl:
+          type: number
+          format: double
+          description: |-
+            Window PnL in USDC, same semantics as the board rows (finite windows
+            marked, `all` realized-only).
+        profile_image:
+          type: string
+          description: Profile image URL.
+        rank_pnl:
+          type:
+            - integer
+            - "null"
+          format: int32
+          description: "`None` when unranked on the PnL board."
+          minimum: 0
+        rank_volume:
+          type:
+            - integer
+            - "null"
+          format: int32
+          description: "`None` when unranked on the volume board."
+          minimum: 0
+        user_id:
+          type: string
+          description: The looked-up wallet.
+        user_name:
+          type: string
+          description: Profile display name of the wallet.
+        verified:
+          type: boolean
+          description: Profile verification badge.
+        volume:
+          type: number
+          format: double
+          description: Both-sides traded volume in shares; never USD.
+        x_username:
+          type: string
+          description: Linked X handle, when one exists.
+    LiveVolume:
+      type: object
+      description: >-
+        `/v2/live-volume`: one entry per market in the requested event(s),
+        ordered
+
+        by `taker_volume` descending, plus `taker_volume_total`; their sum.
+        Events
+
+        that resolve to no markets serve `{ taker_volume_total: 0.0, conditions:
+        [] }`.
+      required:
+        - taker_volume_total
+        - conditions
+      properties:
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConditionVolume"
+          description: |-
+            One row per market under the requested event(s), `taker_volume`
+            descending; empty when the events resolve to no markets.
+        taker_volume_total:
+          type: number
+          format: double
+          description: Sum of the rows' `taker_volume`, in shares.
+    MetaHolder:
+      type: object
+      description: >-
+        One outcome token's holder group in `/v2/holders`: the `token_id` and
+        its
+
+        holders, top-N by net balance. A multi-market request interleaves tokens
+
+        across the page, so merge groups by `token_id`, not by array position.
+      required:
+        - token_id
+        - holders
+      properties:
+        holders:
+          type: array
+          items:
+            $ref: "#/components/schemas/Holder"
+          description: |-
+            Top holders of that token, amount descending (net by default,
+            per-side gross with `include_pnl=true`).
+        token_id:
+          type: string
+          description: The outcome token this group ranks.
+    OpenInterest:
+      type: object
+      description: >-
+        One `/v2/oi` row: the **priced gross** open interest of a market;
+
+        `Σ ((shares − fee_receiver_shares)/1e6 · outcome_price)` across every
+
+        outcome, with no netting. `condition_id` is the market's on-chain
+        condition; the
+
+        global shape carries `condition_id = "GLOBAL"`.
+      required:
+        - condition_id
+        - value
+      properties:
+        condition_id:
+          type: string
+          description: |-
+            Condition id the row answers for; `GLOBAL` on the parameterless
+            global figure.
+        value:
+          type: number
+          format: double
+          description: Priced gross open interest in USDC; `0.0` when nothing is held.
+    Pagination:
+      type: object
+      required:
+        - limit
+        - offset
+        - has_more
+      properties:
+        has_more:
+          type: boolean
+          description: |-
+            Exact: `true` iff another page exists; probe-based, never inferred
+            from page fullness.
+        limit:
+          type: integer
+          format: int32
+          description: Page size this page was served with.
+          minimum: 0
+        next_cursor:
+          type:
+            - string
+            - "null"
+          description: Opaque, signed cursor for the next page; `null` on the last page.
+        offset:
+          type: integer
+          format: int32
+          description: |-
+            Running item offset for display continuity across keyset pages (the
+            cursor drives the actual seek; this is cosmetic; there is no total).
+          minimum: 0
+    PortfolioValue:
+      type: object
+      description: >-
+        `/v2/value`: the user's portfolio value; single-market holdings marked
+        to
+
+        market plus unresolved combo positions at cost basis, rounded to 4
+        decimals. Always
+
+        exactly one row; a user with no positions returns `{ proxy_wallet,
+        value: 0 }`.
+      required:
+        - proxy_wallet
+        - value
+      properties:
+        proxy_wallet:
+          type: string
+          description: The wallet the value was computed for.
+        value:
+          type: number
+          format: double
+          description: |-
+            Portfolio value in USDC, rounded to 4 decimals: holdings marked to
+            market plus non-terminal combos at cost basis.
+    Position:
+      type: object
+      description: >-
+        One position (`/v2/positions`); a holding in a single outcome token,
+        priced
+
+        and enriched.
+
+
+        The shape is **uniform across all three arms** (user OPEN/REDEEMABLE,
+        user
+
+        CLOSED, market-anchored): clients never branch on which spine answered.
+        On
+
+        the CLOSED arm `current_size`/`current_value`/`unrealized_pnl` are ~0 by
+        construction, which is exactly
+
+        what a closed position should report.
+
+
+        Keyset-paginated on the active `sort_by` key: follow the response's
+
+        `next_cursor` to page, and expect the ordering to change with `sort_by`.
+      required:
+        - proxy_wallet
+        - token_id
+        - condition_id
+        - current_size
+        - avg_price
+        - entry_cost_usdc
+        - entry_fees_usdc
+        - total_cost_usdc
+        - current_price
+        - current_value
+        - total_size
+        - realized_pnl
+        - unrealized_pnl
+        - total_pnl
+        - percent_pnl
+        - percent_realized_pnl
+        - status
+        - redeemable
+        - mergeable
+        - negative_risk
+        - archived
+        - title
+        - slug
+        - icon
+        - event_id
+        - event_slug
+        - outcome
+        - outcome_index
+        - opposite_outcome
+        - opposite_token_id
+        - end_date
+        - last_event_at
+        - name
+        - profile_image
+        - verified
+      properties:
+        archived:
+          type: boolean
+          description: >-
+            Whether the market is archived; tells a caller using
+            `includeArchived`
+
+            which rows the flag surfaced.
+        avg_price:
+          type: number
+          format: double
+          description: Weighted-average entry price per share, in USDC.
+        condition_id:
+          type: string
+          description: The on-chain condition id.
+        current_price:
+          type: number
+          format: double
+          description: Live mark per share, in USDC.
+        current_size:
+          type: number
+          format: double
+          description: The CURRENT holding, in shares (~0 residual on the CLOSED arm).
+        current_value:
+          type: number
+          format: double
+          description: "`current_size × current_price`, in USDC."
+        end_date:
+          type: string
+          description: Market end date, `YYYY-MM-DD`; `1970-01-01` when Gamma has none.
+        entry_cost_usdc:
+          type: number
+          format: double
+          description: The fee-EXCLUSIVE entry basis.
+        entry_fees_usdc:
+          type: number
+          format: double
+          description: |-
+            Attributed BUY-fee total for the position. Disclosure only:
+            `entry_cost_usdc` is already fee-exclusive, so never re-deduct this
+            from a PnL column.
+        event_id:
+          type: string
+          description: Gamma event id of the parent event.
+        event_slug:
+          type: string
+          description: Parent event slug.
+        icon:
+          type: string
+          description: Market icon URL.
+        last_event_at:
+          type: integer
+          format: int64
+          description: The row's last economics event, epoch seconds; 0 without native
+            state.
+        mergeable:
+          type: boolean
+          description: |-
+            Whether the wallet also holds the opposite outcome, so the pair can
+            merge back into collateral.
+        name:
+          type: string
+          description: Profile display name of the wallet.
+        negative_risk:
+          type: boolean
+          description: Whether the market belongs to a neg-risk group.
+        opposite_outcome:
+          type: string
+          description: Label of the market's other outcome; what a merge pairs with.
+        opposite_token_id:
+          type: string
+          description: Token id of the market's other outcome.
+        outcome:
+          type: string
+          description: Label of the held outcome (e.g. `Yes`).
+        outcome_index:
+          type: integer
+          format: int32
+          description: |-
+            Index of the held outcome within the market; `999` means the outcome
+            could not be labeled.
+        percent_pnl:
+          type: number
+          format: double
+          description: |-
+            `(current_value - entry_cost_usdc) / entry_cost_usdc`, as a percent.
+            Fee-exclusive basis, and the numerator is `unrealized_pnl`; not
+            `total_pnl / total_cost_usdc`.
+        percent_realized_pnl:
+          type: number
+          format: double
+          description: >-
+            `(current_value - total_size × avg_price) / (total_size ×
+            avg_price)`,
+
+            as a percent. A compatibility shape: despite the name, it is not
+
+            `realized_pnl` over a basis.
+        profile_image:
+          type: string
+          description: Profile image URL.
+        proxy_wallet:
+          type: string
+          description: Proxy wallet holding the position.
+        realized_pnl:
+          type: number
+          format: double
+          description: Realized PnL in USDC, cumulative for the position.
+        redeemable:
+          type: boolean
+          description: >-
+            Whether the position can be redeemed now: its market resolved and
+            the
+
+            tokens are still held (losing sides included; redeemable ≠ won).
+        slug:
+          type: string
+          description: Market slug; the URL segment on polymarket.com.
+        status:
+          type: string
+          description: |-
+            The row's actual state; can be narrower than the requested `status`,
+            since an `OPEN` request also returns `REDEEMABLE` rows.
+        title:
+          type: string
+          description: Market question title (Gamma enrichment; empty when unenriched).
+        token_id:
+          type: string
+          description: The outcome token id.
+        total_cost_usdc:
+          type: number
+          format: double
+          description: >-
+            Gross (fee-INCLUSIVE) basis. Always exactly
+
+            `entry_cost_usdc + entry_fees_usdc`; the contract sums the two
+            served
+
+            columns, so the identity holds on every row of every arm.
+        total_pnl:
+          type: number
+          format: double
+          description: Always equals `realized_pnl + unrealized_pnl`.
+        total_size:
+          type: number
+          format: double
+          description: |-
+            LIFETIME bought shares (the WAC denominator), never the
+            current balance; that is `current_size`.
+        unrealized_pnl:
+          type: number
+          format: double
+          description: "Unrealized (mark-to-market) PnL: `current_value - entry_cost_usdc`."
+        verified:
+          type: boolean
+          description: Profile verification badge.
+    PositionsPage:
+      type: object
+      description: "`{ data, pagination }` envelope for `/v2/positions`."
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Position"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    PricePoint:
+      type: object
+      description: One served point.
+      required:
+        - timestamp
+        - price
+        - resolution_seconds
+      properties:
+        price:
+          type: number
+          format: double
+          description: Price in the range 0…1. Always a JSON number.
+        resolution_seconds:
+          type: integer
+          format: int64
+          description: >-
+            Width of the window this price was observed in: `0` for an exact
+            tick,
+
+            the bucket width for an aggregate. So the price was observed within
+
+            `[timestamp, timestamp + resolution_seconds)`, and a caller can tell
+
+            whether that is precise enough.
+
+
+            Per-point rather than per-response because points in one response
+
+            genuinely differ: grid points carry the requested bucket width, the
+
+            series' terminal point is an exact tick at `0`, and a tier-degraded
+
+            `as_of` carries its tier's width.
+
+
+            This is the ONLY thing the payload says about provenance,
+            deliberately.
+        timestamp:
+          type: integer
+          format: int64
+          description: >-
+            The OBSERVATION's own time, epoch seconds, never the time that was
+
+            asked for. A raw tick reports the tick; an aggregate reports its
+            bucket
+
+            start.
+    PricesHistoryPage:
+      type: object
+      description: |-
+        `{ data, pagination }` envelope for `/v2/prices-history`. The terminal
+        point (the latest observation inside the window) is part of the series
+        and lands on the final page, so a client that wants the freshest value
+        on a multi-page series follows the cursor to the end.
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/PricePoint"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    Resolution:
+      type: object
+      description: >-
+        One non-paginated `/v2/resolutions` row. UMA lifecycle rows populate the
+
+        numeric-string price fields; direct question lookups omit
+        `condition_id`,
+
+        while condition/event lookups retain both the selected condition and
+        backing
+
+        UMA question. Native V2 and terminal CTF rows populate condition
+        lifecycle,
+
+        payout, provenance, and finality fields where those sources provide
+        them.
+      required:
+        - status
+        - extended_review
+        - was_disputed
+        - new_version_q
+        - transaction_hash
+        - log_index
+        - last_update_timestamp
+      properties:
+        condition_id:
+          type:
+            - string
+            - "null"
+          description: Condition id the row answers for; absent on question-keyed rows.
+        expected_settlement_time:
+          type:
+            - string
+            - "null"
+          description: >-
+            Estimated settlement time in RFC3339 UTC, not a guaranteed
+            resolution
+
+            deadline. Omitted when timing is unavailable; clients must not
+            derive
+
+            a deadline from `last_update_timestamp` or assume that an unresolved
+
+            vote settles in its first round.
+        extended_review:
+          type: boolean
+          description: >-
+            True while a managed proposal sits past its normal expiry in
+            extended
+
+            review; always false outside that window.
+        last_update_timestamp:
+          type: string
+          description: |-
+            Latest lifecycle change: an epoch-seconds string on question-keyed
+            rows, RFC3339 UTC on condition-keyed rows.
+        log_index:
+          type: string
+          description: |-
+            Log index of the latest lifecycle event, as a numeric string; empty
+            where `transaction_hash` is empty.
+        market_type:
+          type:
+            - string
+            - "null"
+          description: BINARY, INCREMENTAL_NEGRISK or ATOMIC_NEGRISK; condition-keyed rows
+            only.
+        new_version_q:
+          type: boolean
+          description: Whether the question rules were updated after posing.
+        payouts:
+          type:
+            - array
+            - "null"
+          items:
+            type: integer
+            format: int64
+          description: |-
+            Per-outcome payout in micro-USDC per share, `[outcome0, outcome1]`;
+            present on resolved condition-keyed rows.
+        price:
+          type:
+            - string
+            - "null"
+          description: Final settlement price, same conventions as `proposed_price`.
+        proposed_price:
+          type:
+            - string
+            - "null"
+          description: |-
+            Price of the first proposal as a numeric string; `69` means unset.
+            Present on question-keyed rows only.
+        question_id:
+          type:
+            - string
+            - "null"
+          description: UMA question id serving the row; absent on condition-keyed rows.
+        reporter:
+          type:
+            - string
+            - "null"
+          description: "Reporter family that resolved it: UMA_OO, CHAINLINK or EOA."
+        reproposed_price:
+          type:
+            - string
+            - "null"
+          description: Price of the second proposal, same conventions as `proposed_price`.
+        resolution_source:
+          type:
+            - string
+            - "null"
+          description: |-
+            `reported` (an oracle reported it) or `derived` (a neg-risk sibling
+            resolution no client can reconstruct).
+        resolved_at:
+          type:
+            - string
+            - "null"
+          description: When the condition resolved, RFC3339 UTC.
+        resolved_block:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: Block the condition resolved at.
+        status:
+          type: string
+          description: >-
+            Lifecycle state: initialized, posed, proposed, challenged,
+            reproposed,
+
+            disputed or resolved; condition-keyed rows can also serve active and
+
+            arbitration.
+        transaction_hash:
+          type: string
+          description: |-
+            Transaction of the latest lifecycle event; empty on condition-keyed
+            rows without one.
+        was_arbitrated:
+          type:
+            - boolean
+            - "null"
+          description: Whether arbitration was triggered on the request.
+        was_disputed:
+          type: boolean
+          description: Whether the resolution was disputed at any point.
+    ResolutionWithSettlementTime:
+      allOf:
+        - $ref: "#/components/schemas/Resolution"
+        - type: object
+          properties:
+            settlement_time_basis:
+              type:
+                - string
+                - "null"
+              description: "`managed_proposal_expiration`, `liveness`, or
+                `dvm_round_estimate`."
+      description: >-
+        Existing shared resolution fields plus the source of a derived estimate.
+
+        The flattened shape keeps `/v2/resolutions` compatible with existing
+        clients.
+    ServiceStatus:
+      type: object
+      description: >-
+        `/v2/status` payload.
+
+
+        Served from a snapshot refreshed in the background, never computed on
+        the
+
+        request. `computed_at`/`age_seconds` make that explicit rather than
+        implicit:
+
+        if the refresher wedges or its datastore goes away, the answer keeps
+        being
+
+        served with a growing age instead of turning into a 500; the right
+        degraded
+
+        mode for the endpoint you call when something is already wrong.
+      required:
+        - computed_at
+        - age_seconds
+        - serving
+        - ingestion
+      properties:
+        age_seconds:
+          type: integer
+          format: int64
+          description: |-
+            How old the snapshot is, in seconds. Normally under the refresh
+            interval; a value that keeps climbing means the refresher is not
+            completing, and the freshness figures below are that stale ON TOP of
+            whatever lag they report.
+        computed_at:
+          type: string
+          description: When this snapshot was taken, RFC 3339 in UTC.
+        ingestion:
+          $ref: "#/components/schemas/IngestionFreshness"
+        serving:
+          $ref: "#/components/schemas/ServingFreshness"
+    ServingFreshness:
+      type: object
+      description: >-
+        What API consumers actually experience: the projections behind the
+        feeds.
+
+
+        One headline number and the name of whichever mechanism produced it, so
+        a
+
+        single stalled projection cannot hide behind two healthy ones; the same
+
+        shape as `ingestion.most_lagged`, for the same reason.
+      required:
+        - mechanisms
+      properties:
+        lag_seconds:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: |-
+            The worst age across `mechanisms`. `null` only when no mechanism
+            reported at all.
+        mechanisms:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServingMechanism"
+          description: |-
+            Every mechanism that produced a candidate freshness row, in a fixed
+            order; `worst` names the culprit.
+        worst:
+          type:
+            - string
+            - "null"
+          description: Which mechanism `lag_seconds` came from.
+    ServingMechanism:
+      type: object
+      description: One serving mechanism's freshness.
+      required:
+        - name
+        - age_seconds
+      properties:
+        age_seconds:
+          type: integer
+          format: int64
+          description: Seconds since it last advanced, by its own clock.
+        blocks_behind:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: |-
+            How far behind the ingestion tail it has projected. Absent for a
+            mechanism that records a time but no block.
+        name:
+          type: string
+          description: "What this mechanism produces: `activity_feed`, `custody_balances`,
+            `pnl`."
+    Trade:
+      type: object
+      description: A trade (`/v2/trades`).
+      required:
+        - proxy_wallet
+        - side
+        - token_id
+        - condition_id
+        - size
+        - price
+        - timestamp
+        - title
+        - slug
+        - icon
+        - event_slug
+        - outcome
+        - outcome_index
+        - name
+        - pseudonym
+        - bio
+        - profile_image
+        - profile_image_optimized
+        - transaction_hash
+      properties:
+        bio:
+          type: string
+          description: Profile bio text.
+        condition_id:
+          type: string
+          description: On-chain condition id of the market (`0x` hex).
+        event_slug:
+          type: string
+          description: Parent event slug.
+        icon:
+          type: string
+          description: Market icon URL.
+        name:
+          type: string
+          description: Profile display name of the wallet.
+        outcome:
+          type: string
+          description: Label of the traded outcome (e.g. `Yes`).
+        outcome_index:
+          type: integer
+          format: int32
+          description: |-
+            Index of the traded outcome within the market; `999` means the
+            outcome could not be labeled.
+        price:
+          type: number
+          format: double
+          description: Execution price per share, in USDC.
+        profile_image:
+          type: string
+          description: Profile image URL.
+        profile_image_optimized:
+          type: string
+          description: Resized profile image URL, when one exists.
+        proxy_wallet:
+          type: string
+          description: |-
+            Proxy wallet the row belongs to; the address every wallet-keyed
+            endpoint accepts as `user`.
+        pseudonym:
+          type: string
+          description: Generated fallback handle for profiles without a display name.
+        side:
+          type: string
+          description: "`BUY` or `SELL`, from this wallet's perspective."
+        size:
+          type: number
+          format: double
+          description: Filled quantity in shares; bare sizes are shares, never USD.
+        slug:
+          type: string
+          description: Market slug; the URL segment on polymarket.com.
+        timestamp:
+          type: integer
+          format: int64
+          description: Block timestamp of the fill, epoch seconds.
+        title:
+          type: string
+          description: Market question title (Gamma enrichment; empty when unenriched).
+        token_id:
+          type: string
+          description: CLOB asset id of the traded outcome token.
+        transaction_hash:
+          type: string
+          description: Hash of the settling transaction.
+    TradesPage:
+      type: object
+      description: "`{ data, pagination }` envelope for `/v2/trades`."
+      required:
+        - data
+        - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trade"
+          description: The page's rows.
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+          description: "Paging envelope: follow `next_cursor` until `null`."
+    UserPnlPoint:
+      type: object
+      description: >-
+        One dense cumulative v2 chart point in USDC.
+
+
+        Nullable values mean the historical source or mark was unavailable.
+        Clients
+
+        must not coerce them to zero.
+      required:
+        - timestamp
+        - source_block
+        - realized_market_pnl
+        - realized_lp_pnl
+        - realized_combo_pnl
+        - realized_pnl
+        - volume
+        - volume_usdc
+        - trade_count
+      properties:
+        cashflow_net:
+          type:
+            - number
+            - "null"
+          format: double
+          description: "`deposits - withdrawals`."
+        deposits:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Collateral moved into the wallet.
+        economic_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: "`position_pnl + wallet_income`; the all-in economic result."
+        fees:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Negative cumulative fee charges, for direct chart composition.
+        fees_paid:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Refunds minus charges; a disclosure, not another PnL adjustment.
+        fees_refunded:
+          type:
+            - number
+            - "null"
+          format: double
+          description: "Fee atom: total fees refunded."
+        maker_rebate:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Maker-side fee rebates credited.
+        position_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: "`realized_pnl + unrealized_pnl`; the position-only result."
+        realized_combo_pnl:
+          type: number
+          format: double
+          description: Realized PnL from combo positions.
+        realized_lp_pnl:
+          type: number
+          format: double
+          description: Realized PnL from AMM liquidity-provision activity.
+        realized_market_pnl:
+          type: number
+          format: double
+          description: Realized PnL from market positions.
+        realized_pnl:
+          type: number
+          format: double
+          description: "`realized_market_pnl + realized_lp_pnl + realized_combo_pnl`."
+        referral_income:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Referral income credited.
+        reward_income:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Reward-program income credited.
+        settled_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: "`realized_pnl + wallet_income`; settled economics, no marks."
+        source_block:
+          type: integer
+          format: int64
+          description: Chain block the point was observed at.
+        sponsored_income:
+          type:
+            - number
+            - "null"
+          format: double
+          description: "`reward_income + yield_income + referral_income`."
+        taker_rebate:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Taker-side fee rebates credited.
+        timestamp:
+          type: integer
+          format: int64
+          description: |-
+            Point timestamp, in epoch seconds. Every amount below is CUMULATIVE
+            through this instant, in USDC; `null` means the source is uncovered,
+            never zero.
+        trade_count:
+          type: integer
+          format: int64
+          description: Cumulative maker-attributed canonical exchange fill count.
+          minimum: 0
+        trade_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: |-
+            `position_pnl - realized_lp_pnl + fees_charged - fees_refunded`; the
+            compatibility chart series (`p` on the bare user-pnl route).
+        unrealized_pnl:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Mark-to-market of open inventory.
+        volume:
+          type: number
+          format: double
+          description: Cumulative maker-attributed canonical exchange fill shares.
+        volume_usdc:
+          type: number
+          format: double
+          description: Cumulative maker-attributed canonical exchange fill cash in USDC.
+        wallet_income:
+          type:
+            - number
+            - "null"
+          format: double
+          description: |-
+            All income credited to the wallet: rebates (maker + taker) plus
+            reward, yield and referral income.
+        withdrawals:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Collateral moved out of the wallet.
+        yield_income:
+          type:
+            - number
+            - "null"
+          format: double
+          description: Yield income credited.
+    UserPnlSeries:
+      type: object
+      description: Complete v2 user-PnL response data.
+      required:
+        - proxy_wallet
+        - interval
+        - fidelity
+        - source_fidelity
+        - points
+      properties:
+        fidelity:
+          type: string
+          description: Grid step the points were synthesized on (`1d`, `18h`, `12h`, `3h`,
+            `1h`).
+        interval:
+          type: string
+          description: The window served (`max`, `all`, `1m`, `1w`, `1d`, `12h`, `6h`).
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserPnlPoint"
+          description: Dense cumulative points on the requested grid, oldest first.
+        proxy_wallet:
+          type: string
+          description: The wallet the series was computed for.
+        source_fidelity:
+          type: string
+          description: Historical MVP observations are daily even when carried onto a
+            finer grid.
+    UserStats:
+      type: object
+      description: >-
+        The profile card for one wallet, plus its newest persisted all-time PnL
+
+        observation.
+
+
+        `join_date` is `null` when unknown, which is a real state rather than an
+
+        error; a meaningful share of accounts have no recorded creation time.
+
+        `biggest_win` is `0` when the wallet has no win over $1. `all_time_pnl`
+        is
+
+        `null` when the user is known but has no observation yet; a missing user
+        is
+
+        represented by the outer response `data: null` instead.
+      required:
+        - proxy_wallet
+        - trades
+        - biggest_win
+        - views
+      properties:
+        all_time_pnl:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/UserPnlPoint"
+              description: Newest persisted cumulative all-time PnL point, or `null` when
+                absent.
+        biggest_win:
+          type: number
+          format: double
+          description: Largest single resolved win, in USDC.
+        join_date:
+          type:
+            - integer
+            - "null"
+          format: int64
+          description: Epoch seconds, or `null` when the join date is unknown.
+        proxy_wallet:
+          type: string
+          description: The proxy wallet these lifetime statistics describe.
+        trades:
+          type: integer
+          format: int64
+          description: Distinct markets the wallet traded; an exact count.
+          minimum: 0
+        views:
+          type: integer
+          format: int64
+          description: Profile view count.
+          minimum: 0
+    UserVolume:
+      type: object
+      description: >-
+        `/v2/user-volume`: one wallet's trading volume over a whole-day window,
+        in
+
+        both units side by side.
+
+
+        `volume` is both-sides SHARES; `volume_usdc` is the same measure in USD;
+
+        the bare name is the natural unit and `_usdc` is the denomination, the
+        same
+
+        pairing as `current_size` / `entry_cost_usdc` on `/v2/positions`.
+
+        `trade_count` is the number of trades in the window.
+      required:
+        - volume
+        - volume_usdc
+        - trade_count
+      properties:
+        trade_count:
+          type: integer
+          format: int64
+          description: Number of fills in the window.
+          minimum: 0
+        volume:
+          type: number
+          format: double
+          description: Both-sides traded volume over the window, in shares.
+        volume_usdc:
+          type: number
+          format: double
+          description: Both-sides cash volume over the window, in USD.
+tags:
+  - name: wallet
+    description: "Everything anchored on one wallet: positions (base and combos),
+      portfolio value, PnL history, the profile card, trading volume, and token
+      approvals. Pass the proxy wallet as `user`. One exception cuts across
+      sections: `/v2/positions` with `condition` alone (no `user`) answers the
+      market-wide holders question."
+  - name: feeds
+    description: "The high-traffic keyset feeds: trades, activity and combo
+      activity. Filter by `user`, `condition` or `event_id`; page with
+      `next_cursor`."
+  - name: markets
+    description: "Market and event state, keyed by on-chain `condition` ids, Gamma
+      `event_id`s or a CLOB `token_id`: open interest, holders, per-event taker
+      volume, resolution lifecycle, and price history."
+  - name: boards
+    description: "Ranked, windowed boards: the PnL/volume leaderboard, biggest
+      single wins, and the builder standings and volume buckets. Cursors pin the
+      board they were minted on."
+  - name: service
+    description: "Service metadata: data freshness: the serving watermark, its lag,
+      and per-stream ingestion cursors."
