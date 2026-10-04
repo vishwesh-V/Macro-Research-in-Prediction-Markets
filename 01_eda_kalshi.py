@@ -29,8 +29,64 @@ def intro():
     (cut >25 / cut 25 / hold / hike 25 / hike >25). Data from `00_fetch_data_kalshi.py`, queried with
     DuckDB through the views in `sql/kalshi_views.sql`; the queries below are in `sql/kalshi_eda.sql`.
 
-    Prices are probabilities. `mid` is the end-of-day bid/ask midpoint, blank when the spread is wider than 20¢.
+    Prices are probabilities. `mid` is the end-of-day bid/ask midpoint, kept even when the book is wide;
+    filter on `spread <= 0.20` to drop those days.
     """)
+    return
+
+
+@app.cell(hide_code=True)
+def columns_md():
+    mo.md("""
+    ## 0 · The raw files
+
+    The three parquet files from `00_fetch_data_kalshi.py`, column by column with five example rows, before
+    the views in `sql/kalshi_views.sql` rename and join them. `strike` is empty in all three.
+    """)
+    return
+
+
+@app.cell
+def columns():
+    _files = {
+        "kalshi_markets": "One row per contract: one FOMC meeting × one rate-move bucket.",
+        "kalshi_trades": "One row per executed trade; `count` is the number of contracts.",
+        "kalshi_candles_1m": "One row per contract-minute, only when the quote or a trade changed. "
+        "`price_*` is blank in minutes with no trade.",
+    }
+
+
+    def _summarize(src):
+        s = duckdb.sql(f"SUMMARIZE SELECT * FROM {src}").df()
+        # SUMMARIZE's distinct count is approximate and can exceed the row count, so count exactly.
+        distinct = duckdb.sql(
+            "SELECT " + ", ".join(f'count(DISTINCT "{c}")' for c in s["column_name"]) + f" FROM {src}"
+        ).fetchone()
+        table = pd.DataFrame({
+            "column": s["column_name"],
+            "type": s["column_type"].str.replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ"),
+            "min": s["min"],
+            "max": s["max"],
+            "distinct": distinct,
+            "null %": s["null_percentage"].astype(float).round(1),
+        })
+        return int(s["count"].iloc[0]), table
+
+
+    _tabs = {}
+    for _name, _about in _files.items():
+        _src = f"read_parquet('{ROOT / 'data' / _name}.parquet')"
+        _rows, _table = _summarize(_src)
+        _examples = duckdb.sql(
+            f"SELECT * FROM (SELECT * FROM {_src} USING SAMPLE reservoir(5 ROWS) REPEATABLE (42)) ORDER BY ALL"
+        ).df()
+        _tabs[f"{_name} · {_rows:,} rows"] = mo.vstack([
+            mo.md(_about),
+            mo.ui.table(_table, selection=None, page_size=25),
+            mo.md("**Example rows** (random, fixed seed)"),
+            mo.ui.table(_examples, selection=None),
+        ])
+    mo.ui.tabs(_tabs)
     return
 
 
@@ -112,7 +168,9 @@ def path_md():
     mo.md("""
     ## 3 · Probability path for one meeting
 
-    End-of-day mid per bucket. Gaps are days where the spread was wider than 20¢.
+    **Top:** end-of-day mid per bucket, including days when the book was wide. **Bottom:** the bid–ask spread
+    behind each mid (log scale, dashed line at 20¢). A spike on top that lines up with a wide spread below is
+    usually a thin book, not news. Hover either panel to mark the same date in both.
     """)
     return
 
@@ -131,14 +189,40 @@ def meeting_picker(meetings):
 @app.cell
 def path(con, meeting_picker, move_scale, queries):
     path = con.execute(queries["probability_path"], {"event_ticker": meeting_picker.value}).df()
-    alt.Chart(path).mark_line(strokeWidth=2).encode(
-        x=alt.X("date:T", title=None),
-        y=alt.Y("mid:Q", title="Probability (mid)", scale=alt.Scale(domain=[0, 1])),
-        color=alt.Color("move:N", scale=move_scale(path.move), title="Outcome"),
-        tooltip=[alt.Tooltip("date:T"), "move:N", alt.Tooltip("days_to_meeting:Q", title="Days to meeting"),
-                 alt.Tooltip("bid:Q", format=".2f"), alt.Tooltip("ask:Q", format=".2f"), alt.Tooltip("mid:Q", format=".3f"),
-                 alt.Tooltip("volume:Q", format=",.0f")],
-    ).properties(width="container", height=320, title=f"Daily mid by outcome · {meeting_picker.value}")
+
+    # One hover selection per panel; either one marks the date in both panels.
+    _hovers = {p: alt.selection_point(name=f"hover_{p}", fields=["date"], nearest=True, on="pointerover",
+                                      clear="pointerout", empty=False) for p in ("price", "spread")}
+    _hovered = _hovers["price"] | _hovers["spread"]
+    _x = alt.X("date:T", title=None)
+    _color = alt.Color("move:N", scale=move_scale(path.move), title="Outcome")
+    _tooltip = [alt.Tooltip("date:T"), "move:N", alt.Tooltip("days_to_meeting:Q", title="Days to meeting"),
+                alt.Tooltip("bid:Q", format=".2f"), alt.Tooltip("ask:Q", format=".2f"), alt.Tooltip("mid:Q", format=".3f"),
+                alt.Tooltip("spread:Q", format=".2f"), alt.Tooltip("volume:Q", format=",.0f")]
+
+
+    def _panel(name, y, height, title, *extra):
+        base = alt.Chart(path).encode(x=_x, y=y, color=_color)
+        return alt.layer(
+            *extra,
+            base.mark_line(strokeWidth=2),
+            base.mark_point(filled=True, size=64, stroke="#fcfcfb", strokeWidth=2).encode(
+                opacity=alt.condition(_hovered, alt.value(1), alt.value(0)), tooltip=_tooltip,
+            ).add_params(_hovers[name]),
+            alt.Chart(path).mark_rule(color="#9a9994").encode(x=_x).transform_filter(_hovered),
+        ).properties(width=760, height=height, title=title)
+
+
+    _price = _panel("price", alt.Y("mid:Q", title="Probability (mid)", scale=alt.Scale(domain=[0, 1])),
+                    320, f"Daily mid by outcome · {meeting_picker.value}")
+    _spread = _panel(
+        "spread",
+        alt.Y("spread:Q", title="Bid–ask spread", scale=alt.Scale(type="log", domain=[0.01, 1]),
+              axis=alt.Axis(values=[0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1], labelExpr="round(datum.value * 100) + '¢'")),
+        160, "End-of-day spread, log scale · dashed line: 20¢",
+        alt.Chart(pd.DataFrame({"spread": [0.20]})).mark_rule(color="#9a9994", strokeDash=[4, 4]).encode(y="spread:Q"),
+    )
+    alt.vconcat(_price, _spread).resolve_scale(x="shared", color="shared")
     return
 
 
@@ -148,7 +232,7 @@ def quality_md():
     ## 4 · Quote quality
 
     **Left:** median spread per bucket in the 60 days before each meeting. **Right:** how far the buckets of a
-    meeting sum from 1 on days when every bucket has a usable quote. A sum above 1 is the market's overround.
+    meeting sum from 1 on days when every bucket has a quote. A sum above 1 is the market's overround.
     """)
     return
 

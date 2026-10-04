@@ -16,7 +16,7 @@ ORDER BY month;
 
 -- name: spread_by_move
 -- Median spread per outcome bucket in the last 60 days before each meeting
--- (all quotes, including wide ones; median_mid uses only spreads <= 20c).
+-- (all quotes, including wide ones).
 -- Tail buckets with wide spreads are where the favorite-longshot bias would hide.
 SELECT
     move,
@@ -41,7 +41,7 @@ ORDER BY date, move_bps;
 
 -- name: sum_of_mids
 -- The buckets of a meeting should sum to ~1. Large deviations flag stale quotes.
--- `buckets_quoted` counts buckets with a usable mid (spread <= 20c).
+-- `buckets_quoted` counts buckets with a mid.
 SELECT
     event_ticker,
     date,

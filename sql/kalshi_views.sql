@@ -90,7 +90,8 @@ JOIN markets m USING (ticker);
 -- meeting (or today): the quote in force at the end of each day, carried forward
 -- over days with no candle, plus that day's volume. The usual input for
 -- calibration over t in [-60, -1] days.
--- `mid` is NULL when the spread is wider than 20c: a 0c/100c book says nothing.
+-- `mid` is kept even when the book is wide, where it says little (a 0c/37c book
+-- gives 18.5c). Add `spread <= 0.20` to a query to drop those days.
 CREATE OR REPLACE VIEW candles_daily AS
 WITH days AS (
     SELECT
@@ -122,7 +123,7 @@ SELECT
     date_diff('day', e.date, c.meeting_date) AS days_to_meeting,
     c.bid,
     c.ask,
-    CASE WHEN c.spread <= 0.20 THEN c.mid END AS mid,
+    c.mid,
     c.spread,
     coalesce(v.volume, 0) AS volume,
     c.open_interest,
