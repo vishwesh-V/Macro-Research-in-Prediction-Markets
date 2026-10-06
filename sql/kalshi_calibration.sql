@@ -6,6 +6,12 @@
 -- One row per settled contract and horizon: the quote in force at $snapshot_hour ET,
 -- `ttm` days before the meeting, and whether the contract settled YES (`y`).
 -- Contracts not yet listed at a horizon have no quote and drop out.
+--   p               raw bid/ask midpoint
+--   q               p divided by the sum of p over the meeting's buckets at that snapshot,
+--                   so the buckets sum to 1 (NULL unless every bucket is quoted)
+--   at_floor        mid below 1¢ or from 99¢ up: a contract at the tick floor
+--                   (0¢ bid / 1¢ ask, or no ask), not a priced forecast
+--   quote_age_days  how long the quote had been in force at the snapshot
 -- Parameters: $ttms (list of days to meeting), $snapshot_hour (hour of day, ET).
 WITH grid AS (
     SELECT
@@ -17,21 +23,32 @@ WITH grid AS (
         CAST(m.result = 'yes' AS INTEGER) AS y,
         h.ttm,
         ((m.meeting_date - h.ttm) + to_hours(CAST($snapshot_hour AS BIGINT)))::TIMESTAMP
-            AT TIME ZONE 'America/New_York' AS snapshot_ts
+            AT TIME ZONE 'America/New_York' AS snapshot_ts,
+        count(*) OVER (PARTITION BY m.event_ticker, h.ttm) AS buckets
     FROM markets m
     CROSS JOIN (SELECT unnest($ttms) AS ttm) h
     WHERE m.status = 'finalized'
+),
+quoted AS (
+    SELECT
+        g.*,
+        c.ts AS quote_ts,
+        c.bid_close AS bid,
+        c.ask_close AS ask,
+        c.ask_close - c.bid_close AS spread,
+        (c.bid_close + c.ask_close) / 2 AS p,
+        epoch(g.snapshot_ts - c.ts) / 86400 AS quote_age_days
+    FROM grid g
+    ASOF JOIN candles_clean c ON g.ticker = c.ticker AND g.snapshot_ts >= c.ts
 )
 SELECT
-    g.*,
-    c.ts AS quote_ts,
-    c.bid_close AS bid,
-    c.ask_close AS ask,
-    c.ask_close - c.bid_close AS spread,
-    (c.bid_close + c.ask_close) / 2 AS p
-FROM grid g
-ASOF JOIN candles_clean c ON g.ticker = c.ticker AND g.snapshot_ts >= c.ts
-ORDER BY g.event_ticker, g.ttm, g.move_bps;
+    * EXCLUDE (buckets),
+    sum(p) OVER w AS sum_p,
+    CASE WHEN count(*) OVER w = buckets THEN p / sum(p) OVER w END AS q,
+    p < 0.01 OR p >= 0.99 AS at_floor
+FROM quoted
+WINDOW w AS (PARTITION BY event_ticker, ttm)
+ORDER BY event_ticker, ttm, move_bps;
 
 
 -- name: minute_quotes
