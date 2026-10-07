@@ -28,14 +28,10 @@ with app.setup:
         "30 days": [30],
         "45–60 days": [45, 60],
     }
-    # Time-to-maturity buckets for the reliability-by-horizon diagrams, as (first, last) days before the meeting.
-    # Daily snapshots fall in a bucket by their horizon; minute quotes by the ET calendar day they were in force.
-    TTM_BUCKETS = {
-        "1–7 days": (1, 7),
-        "8–21 days": (8, 21),
-        "22–60 days": (22, 60),
-    }
-    TTM_COLORS = ["#104281", "#2a78d6", "#86b6ef"]  # one blue, darker = closer to the meeting
+    # Time-to-maturity buckets for the reliability-by-horizon diagrams: days 1–60 before the meeting cut into this
+    # many runs of whole days with about the same number of trades each (cut in the `ttm_buckets` cell).
+    N_TTM_BUCKETS = 5
+    TTM_COLORS = ["#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef"]  # one blue, darker = closer to the meeting
     SNAPSHOT_HOUR_ET = 16
     STALE_DAYS = 7  # a quote unchanged for longer than this is stale (robustness check)
     MINUTE_WINDOW_DAYS = 60  # minute-level reliability: days before the meeting
@@ -108,20 +104,24 @@ def bucket_summary(tables, weight, meetings):
 
 
 @app.function
-def reliability_by_bucket_chart(table, size, size_title, title):
-    """Reliability diagram with one line per time-to-maturity bucket, darker = closer to the meeting."""
+def reliability_by_bucket_chart(table, buckets, size, size_title, title):
+    """Reliability diagram with one line per time-to-maturity bucket (`buckets`, nearest the meeting first),
+    darker = closer to the meeting."""
     scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
-    buckets = list(TTM_BUCKETS)
     diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
         x="p:Q", y="p:Q")
     base = alt.Chart(table).encode(
         x=alt.X("mean_p:Q", title="Predicted", axis=alt.Axis(format="%"), scale=scale),
         y=alt.Y("observed:Q", title="Observed", axis=alt.Axis(format="%"), scale=scale),
         color=alt.Color("bucket:N", title="Days to meeting", sort=buckets,
-                        scale=alt.Scale(domain=buckets, range=TTM_COLORS)),
+                        scale=alt.Scale(domain=buckets, range=TTM_COLORS[:len(buckets)])),
     )
-    lines = base.mark_line(strokeWidth=2).encode(order="mean_p:Q")
-    points = base.mark_circle(size=80, opacity=1, stroke="#fcfcfb", strokeWidth=2).encode(
+    # Click a bucket in the legend to highlight it (shift-click for several); the others fade.
+    pick = alt.selection_point(fields=["bucket"], bind="legend")
+    fade = alt.condition(pick, alt.value(1), alt.value(0.12))
+    lines = base.mark_line(strokeWidth=2).encode(order="mean_p:Q", opacity=fade).add_params(pick)
+    points = base.mark_circle(size=80, stroke="#fcfcfb", strokeWidth=2).encode(
+        opacity=fade,
         tooltip=[alt.Tooltip("bucket:N", title="Days to meeting"), alt.Tooltip("bin:N", title="Bin"),
                  alt.Tooltip(f"{size}:Q", format=",.0f", title=size_title), "contracts:Q", "meetings:Q",
                  alt.Tooltip("mean_p:Q", format=".3f", title="Mean forecast"),
@@ -145,6 +145,19 @@ def ce_heatmap(long, row, row_title, row_order, stat_title, title):
                  alt.Tooltip("value:Q", format=".3f", title=f"{stat_title} log loss"),
                  alt.Tooltip("n:Q", format=",", title="Forecasts")],
     ).properties(width="container", height=alt.Step(28), title=title)
+
+
+@app.function
+def equal_trade_buckets(trades_by_day, n):
+    """Cut days 1..max into `n` runs of whole days holding about the same number of trades: each cut falls on the
+    day whose cumulative share of trades is nearest k/n. Returns {"a–b days": (a, b)}, nearest the meeting first."""
+    days = range(1, trades_by_day.days_to_meeting.max() + 1)
+    counts = trades_by_day.set_index("days_to_meeting").trades.reindex(days, fill_value=0)
+    share = counts.cumsum() / counts.sum()
+    cuts = [int((share - k / n).abs().idxmin()) for k in range(1, n)]
+    assert cuts == sorted(set(cuts)), f"two cuts on the same day: {cuts}"
+    edges = list(zip([1] + [c + 1 for c in cuts], cuts + [max(days)]))
+    return {f"{lo}–{hi} days": (lo, hi) for lo, hi in edges}
 
 
 @app.function
@@ -345,17 +358,35 @@ def ttm_md():
     mo.md(r"""
     ### By time to maturity
 
-    The same diagram with one line per time-to-maturity bucket (1–7, 8–21 and 22–60 days before the meeting;
-    `TTM_BUCKETS` in the setup cell), darker closer to the meeting, to see whether the pattern changes as the
-    meeting approaches. The analysis choices apply. Bins default to 20¢, wider than above: split three ways, the
-    middle bins hold only a few meetings each, and at 10¢ single outcomes swing them between 0% and 100%. Points
-    are not sized: hover for a bin's forecasts and meetings.
+    The same diagram with one line per time-to-maturity bucket, darker closer to the meeting, to see whether the
+    pattern changes as the meeting approaches. The buckets split days 1–60 before the meeting into five runs of whole
+    days that each hold about a fifth of all trades in settled contracts (table below), so they are narrow near the
+    meeting, where trading is heaviest, and wide further out. They are recomputed from the trade data on each run.
+    Each daily line pools the snapshot days (`TTMS`) that fall in its bucket, listed in the table's `snapshot_days`.
+    The analysis choices apply. Bins default to 20¢, wider than above: split five ways, the middle bins hold only a
+    few meetings each, and at 10¢ single outcomes swing them between 0% and 100%. Points are not sized: hover for a
+    bin's forecasts and meetings. Click a bucket in the legend to highlight it (shift-click for several).
 
     The summary's **calibration error** is the forecast-weighted average gap between the share settled YES and the
     mean forecast across bins, $\sum_k \frac{n_k}{N}\,\lvert \bar y_k - \bar p_k \rvert$ (0 = on the diagonal). It
     depends on the bin width and is descriptive only; the test comes later.
     """)
     return
+
+
+@app.cell
+def ttm_buckets_cell(con, queries):
+    _trades = con.execute(queries["trades_by_day"], {"max_days": MINUTE_WINDOW_DAYS}).df()
+    ttm_buckets = equal_trade_buckets(_trades, N_TTM_BUCKETS)
+    _split = pd.DataFrame([
+        {"bucket": name, "days": hi - lo + 1,
+         "trades": int(_trades[_trades.days_to_meeting.between(lo, hi)].trades.sum())}
+        for name, (lo, hi) in ttm_buckets.items()
+    ]).assign(share=lambda d: d.trades / d.trades.sum(),
+              snapshot_days=lambda d: [", ".join(str(h) for h in TTMS if lo <= h <= hi)
+                                       for lo, hi in ttm_buckets.values()])
+    mo.ui.table(_split.round(3), selection=None)
+    return (ttm_buckets,)
 
 
 @app.cell
@@ -367,13 +398,14 @@ def ttm_controls():
 
 
 @app.cell
-def ttm_reliability(sample, ttm_bin_width):
-    _by_bucket = {name: sample[sample.ttm.between(lo, hi)] for name, (lo, hi) in TTM_BUCKETS.items()}
+def ttm_reliability(sample, ttm_bin_width, ttm_buckets):
+    _by_bucket = {name: sample[sample.ttm.between(lo, hi)] for name, (lo, hi) in ttm_buckets.items()}
     _tables = pd.concat([reliability_table(d, ttm_bin_width.value).assign(bucket=name)
                          for name, d in _by_bucket.items()])
     _summary = bucket_summary(_tables, "forecasts", {name: d.event_ticker.nunique() for name, d in _by_bucket.items()})
     mo.hstack([
-        reliability_by_bucket_chart(_tables, "forecasts", "Forecasts", "Reliability by days to meeting"),
+        reliability_by_bucket_chart(_tables, list(ttm_buckets), "forecasts", "Forecasts",
+                                    "Reliability by days to meeting"),
         mo.ui.tabs({
             "Summary by bucket": mo.ui.table(_summary.round(4), selection=None),
             "Every bin": mo.ui.table(_tables[["bucket", "bin", "forecasts", "contracts", "meetings", "mean_p",
@@ -404,12 +436,12 @@ def minutes_md():
 
 
 @app.cell
-def minutes(con, queries):
+def minutes(con, queries, ttm_buckets):
     minute_quotes = con.execute(queries["minute_quotes"], {"days_before": MINUTE_WINDOW_DAYS}).df()
     minute_quotes_by_bucket = con.execute(queries["minute_quotes_by_bucket"], {
-        "buckets": list(TTM_BUCKETS),
-        "lo": [lo for lo, _ in TTM_BUCKETS.values()],
-        "hi": [hi for _, hi in TTM_BUCKETS.values()],
+        "buckets": list(ttm_buckets),
+        "lo": [lo for lo, _ in ttm_buckets.values()],
+        "hi": [hi for _, hi in ttm_buckets.values()],
     }).df()
     return minute_quotes, minute_quotes_by_bucket
 
@@ -447,15 +479,15 @@ def minute_ttm_md():
 
 
 @app.cell
-def minute_ttm_reliability(drop_wide, minute_quotes_by_bucket, ttm_bin_width):
+def minute_ttm_reliability(drop_wide, minute_quotes_by_bucket, ttm_bin_width, ttm_buckets):
     _q = minute_quotes_by_bucket[minute_quotes_by_bucket.spread <= 0.20] if drop_wide.value else minute_quotes_by_bucket
-    _by_bucket = {name: _q[_q.bucket == name] for name in TTM_BUCKETS}
+    _by_bucket = {name: _q[_q.bucket == name] for name in ttm_buckets}
     _tables = pd.concat([minute_reliability_table(d, ttm_bin_width.value).assign(bucket=name)
                          for name, d in _by_bucket.items()])
     _summary = bucket_summary(_tables, "contract_hours",
                               {name: d.event_ticker.nunique() for name, d in _by_bucket.items()})
     mo.hstack([
-        reliability_by_bucket_chart(_tables, "contract_hours", "Contract-hours",
+        reliability_by_bucket_chart(_tables, list(ttm_buckets), "contract_hours", "Contract-hours",
                                     "Reliability by days to meeting · every minute"),
         mo.ui.tabs({
             "Summary by bucket": mo.ui.table(_summary.round(4), selection=None),

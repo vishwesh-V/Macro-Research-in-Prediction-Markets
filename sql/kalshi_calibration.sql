@@ -132,3 +132,20 @@ FROM split
 WHERE s1 > s0
 GROUP BY ALL
 ORDER BY bucket, event_ticker, ticker, p;
+
+
+-- name: trades_by_day
+-- Trades in settled contracts per ET calendar day before the meeting, days 1..$max_days. Used to cut the
+-- time-to-maturity buckets so that each holds about the same number of trades. Parameter: $max_days.
+WITH d AS (
+    SELECT date_diff('day', CAST(t.created_time AT TIME ZONE 'America/New_York' AS DATE), t.meeting_date)
+               AS days_to_meeting
+    FROM trades t
+    JOIN markets m USING (ticker)
+    WHERE m.status = 'finalized'
+)
+SELECT days_to_meeting, count(*) AS trades
+FROM d
+WHERE days_to_meeting BETWEEN 1 AND $max_days
+GROUP BY days_to_meeting
+ORDER BY days_to_meeting;
