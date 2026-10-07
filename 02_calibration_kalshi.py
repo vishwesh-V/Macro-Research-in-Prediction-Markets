@@ -28,6 +28,14 @@ with app.setup:
         "30 days": [30],
         "45–60 days": [45, 60],
     }
+    # Finer time-to-maturity buckets for the side-by-side reliability diagrams; the first three split the main group.
+    TTM_BUCKETS = {
+        "1–3 days": [1, 2, 3],
+        "5–10 days": [5, 7, 10],
+        "14–21 days": [14, 21],
+        "30 days": [30],
+        "45–60 days": [45, 60],
+    }
     SNAPSHOT_HOUR_ET = 16
     STALE_DAYS = 7  # a quote unchanged for longer than this is stale (robustness check)
     MINUTE_WINDOW_DAYS = 60  # minute-level reliability: days before the meeting
@@ -56,7 +64,20 @@ def bin_label(lower, delta):
 
 
 @app.function
-def reliability_chart(table, size, size_title, title):
+def reliability_table(forecasts, delta):
+    """Forecasts per probability bin of width `delta`: mean forecast `f` and share settled YES."""
+    return (
+        forecasts.assign(bin_from=prob_bin(forecasts.f, delta))
+        .groupby("bin_from", as_index=False)
+        .agg(forecasts=("f", "size"), contracts=("ticker", "nunique"), meetings=("event_ticker", "nunique"),
+             mean_p=("f", "mean"), observed=("y", "mean"))
+        .assign(bin=lambda d: [bin_label(lo, delta) for lo in d.bin_from])
+        [["bin", "bin_from", "forecasts", "contracts", "meetings", "mean_p", "observed"]]
+    )
+
+
+@app.function
+def reliability_chart(table, size, size_title, title, side=380, size_domain=None):
     """Reliability diagram: share settled YES against the mean forecast per bin, with the 45° line."""
     scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
     diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
@@ -64,13 +85,14 @@ def reliability_chart(table, size, size_title, title):
     points = alt.Chart(table).mark_circle(color="#2a78d6", opacity=0.9, stroke="#fcfcfb", strokeWidth=2).encode(
         x=alt.X("mean_p:Q", title="Predicted", axis=alt.Axis(format="%"), scale=scale),
         y=alt.Y("observed:Q", title="Observed", axis=alt.Axis(format="%"), scale=scale),
-        size=alt.Size(f"{size}:Q", title=size_title, scale=alt.Scale(range=[60, 600])),
+        size=alt.Size(f"{size}:Q", title=size_title,
+                      scale=alt.Scale(range=[60, 600], **({"domain": size_domain} if size_domain else {}))),
         tooltip=[alt.Tooltip("bin:N", title="Bin"),
                  alt.Tooltip(f"{size}:Q", format=",.0f", title=size_title), "contracts:Q", "meetings:Q",
                  alt.Tooltip("mean_p:Q", format=".3f", title="Mean forecast"),
                  alt.Tooltip("observed:Q", format=".3f", title="Share YES")],
     )
-    return (diagonal + points).properties(width=380, height=380, title=title)
+    return (diagonal + points).properties(width=side, height=side, title=title)
 
 
 @app.cell(hide_code=True)
@@ -238,19 +260,58 @@ def controls():
 
 @app.cell
 def reliability(bin_width, horizon, sample):
-    _sel = sample[sample.ttm.isin(horizon.value)]
-    reliability = (
-        _sel.assign(bin_from=prob_bin(_sel.f, bin_width.value))
-        .groupby("bin_from", as_index=False)
-        .agg(forecasts=("f", "size"), contracts=("ticker", "nunique"), meetings=("event_ticker", "nunique"),
-             mean_p=("f", "mean"), observed=("y", "mean"))
-        .assign(bin=lambda d: [bin_label(lo, bin_width.value) for lo in d.bin_from])
-        [["bin", "bin_from", "forecasts", "contracts", "meetings", "mean_p", "observed"]]
-    )
+    reliability = reliability_table(sample[sample.ttm.isin(horizon.value)], bin_width.value)
     mo.hstack([
         reliability_chart(reliability, "forecasts", "Forecasts", f"Reliability · {horizon.selected_key}"),
         mo.ui.table(reliability.drop(columns="bin_from").round(4), selection=None),
     ], widths=[1, 1])
+    return
+
+
+@app.cell(hide_code=True)
+def ttm_md():
+    mo.md(r"""
+    ### By time to maturity
+
+    The same diagram for each time-to-maturity bucket side by side, to see whether the pattern changes as the
+    meeting approaches. Bin width and the analysis choices apply; point sizes are on one scale across panels.
+    Buckets further out hold fewer meetings (see the summary), so their points are noisier.
+
+    The summary's **calibration error** is the forecast-weighted average gap between the share settled YES and the
+    mean forecast across bins, $\sum_k \frac{n_k}{N}\,\lvert \bar y_k - \bar p_k \rvert$ (0 = on the diagonal). It
+    depends on the bin width and is descriptive only; the test comes later.
+    """)
+    return
+
+
+@app.cell
+def ttm_reliability(bin_width, sample):
+    _tables = {name: reliability_table(sample[sample.ttm.isin(hs)], bin_width.value)
+               for name, hs in TTM_BUCKETS.items()}
+    _tables = {name: t for name, t in _tables.items() if len(t)}
+    _domain = [1, max(t.forecasts.max() for t in _tables.values())]
+    _charts = alt.concat(
+        *[reliability_chart(t, "forecasts", "Forecasts", name, side=230, size_domain=_domain)
+          for name, t in _tables.items()],
+        columns=3,
+    ).resolve_scale(size="shared")
+
+    _summary = pd.DataFrame([{
+        "bucket": name,
+        "days": ", ".join(str(h) for h in TTM_BUCKETS[name]),
+        "forecasts": int(t.forecasts.sum()),
+        "meetings": sample[sample.ttm.isin(TTM_BUCKETS[name])].event_ticker.nunique(),
+        "mean_forecast": (t.mean_p * t.forecasts).sum() / t.forecasts.sum(),
+        "share_yes": (t.observed * t.forecasts).sum() / t.forecasts.sum(),
+        "calibration_error": ((t.observed - t.mean_p).abs() * t.forecasts).sum() / t.forecasts.sum(),
+    } for name, t in _tables.items()])
+    _bins = pd.concat([t.assign(bucket=name) for name, t in _tables.items()])[
+        ["bucket", "bin", "forecasts", "contracts", "meetings", "mean_p", "observed"]]
+    mo.vstack([
+        _charts,
+        mo.ui.tabs({"Summary by bucket": mo.ui.table(_summary.round(4), selection=None),
+                    "Every bin": mo.ui.table(_bins.round(4), selection=None, page_size=25)}),
+    ])
     return
 
 
