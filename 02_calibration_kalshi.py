@@ -131,6 +131,23 @@ def reliability_by_bucket_chart(table, size, size_title, title):
 
 
 @app.function
+def ce_heatmap(long, row, row_title, row_order, stat_title, title):
+    """Heatmap of log loss: one row per `row` value, one column per horizon, darker = higher loss (log scale).
+    `long` has columns `row`, `ttm`, `value` and `n` (forecasts behind the cell)."""
+    long = long.assign(horizon=long.ttm.map(lambda h: f"{h}d"))
+    return alt.Chart(long).mark_rect(stroke="#fcfcfb", strokeWidth=2, cornerRadius=2).encode(
+        x=alt.X("horizon:O", title="Days to meeting", sort=[f"{h}d" for h in sorted(long.ttm.unique(), reverse=True)],
+                axis=alt.Axis(labelAngle=0)),
+        y=alt.Y(f"{row}:O", title=row_title, sort=row_order),
+        color=alt.Color("value:Q", title=f"{stat_title} log loss",
+                        scale=alt.Scale(type="log", range=["#cde2fb", "#86b6ef", "#2a78d6", "#104281", "#0d366b"])),
+        tooltip=[alt.Tooltip(f"{row}:O", title=row_title), alt.Tooltip("horizon:O", title="Days to meeting"),
+                 alt.Tooltip("value:Q", format=".3f", title=f"{stat_title} log loss"),
+                 alt.Tooltip("n:Q", format=",", title="Forecasts")],
+    ).properties(width="container", height=alt.Step(28), title=title)
+
+
+@app.function
 def reliability_chart(table, size, size_title, title):
     """Reliability diagram: share settled YES against the mean forecast per bin, with the 45° line."""
     scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
@@ -454,7 +471,8 @@ def ce_type_md():
     mo.md(r"""
     ## 3 · Cross-entropy by contract type
 
-    Log loss per contract type (rows) and horizon (columns), as a mean or a median (control below). `settled YES`
+    Log loss per contract type (rows) and horizon (columns), as a mean or a median (control below), as a heatmap
+    (darker = worse; the color scale is logarithmic, since losses run from 0.005 to above 1) or a table. `settled YES`
     counts the meetings in which that type won. A type that rarely or never wins scores well simply by being priced
     near zero, so read each row next to that count.
 
@@ -487,7 +505,63 @@ def ce_type(ce_stat, sample):
     _yes = sample[sample.y == 1].groupby("move").event_ticker.nunique()
     _by_type.insert(0, "settled YES", _yes.reindex(_by_type.index).fillna(0).astype(int))
     _by_type.loc[["All contracts", "All contracts, per meeting"], "settled YES"] = sample.event_ticker.nunique()
-    mo.ui.table(_by_type.round(3).reset_index(names="contract type"), selection=None)
+
+    _types = sample.groupby(["move", "ttm"]).log_loss.agg(value=_stat, n="size").reset_index()
+    _all = sample.groupby("ttm").log_loss.agg(value=_stat, n="size").reset_index().assign(move="All contracts")
+    _heat = ce_heatmap(pd.concat([_types, _all]), "move", "Contract type", [*_order, "All contracts"],
+                       ce_stat.selected_key, f"{ce_stat.selected_key} log loss by contract type")
+    mo.ui.tabs({"Chart": _heat, "Table": mo.ui.table(_by_type.round(3).reset_index(names="contract type"),
+                                                      selection=None)})
+    return
+
+
+@app.cell(hide_code=True)
+def ce_meetings_md():
+    mo.md("""
+    ### Which meetings drive the score
+
+    Each dot is one meeting's average log loss across its contracts at one horizon; the lines are the mean and the
+    median across meetings (the last row of the table above). Where the mean sits well above the median, a few
+    surprise meetings are pulling it up; they are labeled at their worst horizon. Hover for the meeting and the
+    decision.
+    """)
+    return
+
+
+@app.cell
+def ce_meetings(forecasts, sample):
+    _decision = forecasts[forecasts.y == 1].groupby("event_ticker").move.first()
+    _dates = forecasts.groupby("event_ticker").meeting_date.first()
+    _per_meeting = sample.groupby(["ttm", "event_ticker"], as_index=False).log_loss.mean()
+    _per_meeting["meeting"] = _per_meeting.event_ticker.map(lambda e: pd.Timestamp(_dates[e]).strftime("%b %Y"))
+    _per_meeting["decision"] = _per_meeting.event_ticker.map(_decision)
+    _lines = (_per_meeting.groupby("ttm").log_loss.agg(Mean="mean", Median="median").reset_index()
+              .melt(id_vars="ttm", var_name="statistic", value_name="log_loss"))
+    # Label each surprise meeting once, at its worst horizon.
+    _worst = _per_meeting.loc[_per_meeting.groupby("event_ticker").log_loss.idxmax()]
+    _worst = _worst[_worst.log_loss > 0.5]
+
+    _x = alt.X("ttm:Q", title="Days to meeting", scale=alt.Scale(reverse=True))
+    _y = alt.Y("log_loss:Q", title="Log loss per meeting (lower is better)")
+    _dots = alt.Chart(_per_meeting).mark_circle(size=60, color="#9a9994", opacity=0.6).encode(
+        x=_x, y=_y,
+        tooltip=["meeting:N", "decision:N", alt.Tooltip("ttm:Q", title="Days to meeting"),
+                 alt.Tooltip("log_loss:Q", format=".3f", title="Log loss")])
+    _stat_lines = alt.Chart(_lines).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=64, filled=True)).encode(
+        x=_x, y=_y,
+        color=alt.Color("statistic:N", title="Across meetings",
+                        scale=alt.Scale(domain=["Mean", "Median"], range=["#2a78d6", "#eb6834"]),
+                        legend=alt.Legend(orient="top-left")),
+        tooltip=["statistic:N", alt.Tooltip("ttm:Q", title="Days to meeting"),
+                 alt.Tooltip("log_loss:Q", format=".3f", title="Log loss")])
+    # Labels sit right of their dot, or left of it near the meeting so they stay inside the plot.
+    _labels = [
+        alt.Chart(_worst[side]).mark_text(align=align, dx=dx, color="#52514e").encode(
+            x=_x, y=_y, text="label:N").transform_calculate(label="datum.meeting + ' · ' + datum.decision")
+        for side, align, dx in ((_worst.ttm >= 15, "left", 8), (_worst.ttm < 15, "right", -8))
+    ]
+    alt.layer(_dots, _stat_lines, *_labels).properties(
+        width="container", height=320, title="Log loss per meeting, by days to meeting")
     return
 
 
@@ -497,7 +571,8 @@ def ce_bucket_md():
     ## 4 · Cross-entropy by probability bin
 
     Log loss per probability bin (rows, bin width from the control in section 2) and horizon (columns), as the mean
-    or median chosen in section 3, with the number of forecasts behind each cell in the second tab. As in section 2,
+    or median chosen in section 3, as a heatmap (darker = worse, logarithmic color scale; highest bins at the top) or a
+    table, with the number of forecasts behind each cell in the last tab. As in section 2,
     the bins below 1¢ and from 99¢ up hold the contracts at the tick floor.
     """)
     return
@@ -518,7 +593,13 @@ def ce_bucket(bin_width, ce_stat, sample):
         return mo.ui.table(t.reset_index(names="probability bin"), selection=None, page_size=25)
 
 
-    mo.ui.tabs({f"{ce_stat.selected_key} cross-entropy": _table(_ce, 3), "Forecasts per cell": _table(_n, 0)})
+    _long = (_binned.groupby(["bin_from", "ttm"]).log_loss.agg(value=ce_stat.value, n="size").reset_index()
+             .assign(bin=lambda d: [bin_label(lo, _delta) for lo in d.bin_from]))
+    _heat = ce_heatmap(_long, "bin", "Probability bin",
+                       [bin_label(lo, _delta) for lo in sorted(_long.bin_from.unique(), reverse=True)],
+                       ce_stat.selected_key, f"{ce_stat.selected_key} log loss by probability bin")
+    mo.ui.tabs({"Chart": _heat, f"{ce_stat.selected_key} cross-entropy": _table(_ce, 3),
+                "Forecasts per cell": _table(_n, 0)})
     return
 
 
