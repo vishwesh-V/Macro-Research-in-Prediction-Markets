@@ -10,7 +10,9 @@
 -- The views are cheap: DuckDB reads only the columns and row groups a query needs.
 
 
--- One row per contract. `move_bps` normalizes Kalshi's inconsistent bucket codes:
+-- One row per Fed decision contract (KXFEDDECISION). The data files also hold other
+-- series (CPI, payrolls, ...), which the views below leave out; `all_markets` has every
+-- series. `move_bps` normalizes Kalshi's inconsistent bucket codes:
 -- "cut >25bps" appears as C26, C>25, C24 and TC25; "hold" as H0 with four
 -- different labels. Open-ended buckets get the next 25bp step (cut >25 -> -50).
 CREATE OR REPLACE VIEW markets AS
@@ -43,7 +45,13 @@ SELECT
     open_time,
     close_time,
     volume
-FROM 'data/kalshi_markets.parquet';
+FROM 'data/kalshi_markets.parquet'
+WHERE series_ticker = 'KXFEDDECISION';
+
+
+-- One row per contract of every downloaded series, as stored.
+CREATE OR REPLACE VIEW all_markets AS
+SELECT * FROM 'data/kalshi_markets.parquet';
 
 
 -- Every trade, with the contract's meeting and move attached.

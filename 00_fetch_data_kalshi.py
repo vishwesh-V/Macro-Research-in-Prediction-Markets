@@ -141,33 +141,39 @@ def field(d, name):
 def fetch_markets(series):
     rows = []
     for s in series:
-        events = paginate("/events", "events", {"series_ticker": s})
-        print(f"{s}: {len(events)} events")
-        for e in events:
-            et = e["event_ticker"]
-            for historical, path in ((False, "/markets"), (True, "/historical/markets")):
-                for m in paginate(path, "markets", {"event_ticker": et}):
-                    bucket = m["ticker"].rsplit("-", 1)[-1]
-                    # Rate-level ladders encode the strike as T<level>; decision
-                    # buckets like TH50 ("hike >50bps") have none.
+        # List contracts by series, not event by event: /events omits some events whose
+        # contracts the markets endpoints still serve (e.g. FEDDECISION-24JAN).
+        titles = {e["event_ticker"]: e.get("title") for e in paginate("/events", "events", {"series_ticker": s})}
+        n = 0
+        for historical, path in ((False, "/markets"), (True, "/historical/markets")):
+            for m in paginate(path, "markets", {"series_ticker": s}, limit=1000):
+                n += 1
+                bucket = m["ticker"].rsplit("-", 1)[-1]
+                # Threshold ladders ("above k") carry the strike in floor_strike; older ones
+                # (2022 CPI) only in the ticker suffix, T<k>. Decision buckets like TH50
+                # ("hike >50bps") have none.
+                strike = (num(m.get("floor_strike")) if m.get("strike_type") in ("greater", "greater_or_equal")
+                          else None)
+                if strike is None and bucket.startswith("T"):
                     try:
-                        strike = float(bucket[1:]) if bucket.startswith("T") else None
+                        strike = float(bucket[1:])
                     except ValueError:
-                        strike = None
-                    rows.append({
-                        "ticker": m["ticker"], "event_ticker": et, "series_ticker": s,
-                        "event_title": e.get("title"), "title": m.get("title"),
-                        "bucket": bucket, "outcome": m.get("yes_sub_title"),
-                        "strike": strike, "status": m.get("status"),
-                        "result": m.get("result") or None,
-                        "open_time": m["open_time"], "close_time": m["close_time"],
-                        "volume": num(m.get("volume_fp", m.get("volume"))),
-                        "historical": historical,
-                    })
+                        pass
+                rows.append({
+                    "ticker": m["ticker"], "event_ticker": m["event_ticker"], "series_ticker": s,
+                    "event_title": titles.get(m["event_ticker"]), "title": m.get("title"),
+                    "bucket": bucket, "outcome": m.get("yes_sub_title"),
+                    "strike_type": m.get("strike_type"), "strike": strike, "status": m.get("status"),
+                    "result": m.get("result") or None,
+                    "open_time": m["open_time"], "close_time": m["close_time"],
+                    "volume": num(m.get("volume_fp", m.get("volume"))),
+                    "historical": historical,
+                })
+        print(f"{s}: {len(titles)} listed events, {n} contracts")
     df = pd.DataFrame(rows).drop_duplicates("ticker", keep="last")
     df["strike"] = df.strike.astype(float)  # all-None for decision series otherwise
     for c in ("open_time", "close_time"):
-        df[c] = pd.to_datetime(df[c], utc=True)
+        df[c] = pd.to_datetime(df[c], utc=True, format="ISO8601")
     return df.sort_values(["series_ticker", "close_time", "ticker"]).reset_index(drop=True)
 
 
