@@ -28,14 +28,14 @@ with app.setup:
         "30 days": [30],
         "45–60 days": [45, 60],
     }
-    # Finer time-to-maturity buckets for the side-by-side reliability diagrams; the first three split the main group.
+    # Time-to-maturity buckets for the reliability-by-horizon diagrams, as (first, last) days before the meeting.
+    # Daily snapshots fall in a bucket by their horizon; minute quotes by the ET calendar day they were in force.
     TTM_BUCKETS = {
-        "1–3 days": [1, 2, 3],
-        "5–10 days": [5, 7, 10],
-        "14–21 days": [14, 21],
-        "30 days": [30],
-        "45–60 days": [45, 60],
+        "1–7 days": (1, 7),
+        "8–21 days": (8, 21),
+        "22–60 days": (22, 60),
     }
+    TTM_COLORS = ["#104281", "#2a78d6", "#86b6ef"]  # one blue, darker = closer to the meeting
     SNAPSHOT_HOUR_ET = 16
     STALE_DAYS = 7  # a quote unchanged for longer than this is stale (robustness check)
     MINUTE_WINDOW_DAYS = 60  # minute-level reliability: days before the meeting
@@ -77,7 +77,61 @@ def reliability_table(forecasts, delta):
 
 
 @app.function
-def reliability_chart(table, size, size_title, title, side=380, size_domain=None):
+def minute_reliability_table(quotes, delta):
+    """Time-weighted bins of width `delta`: each quote counts for the seconds it was in force."""
+    return (
+        quotes.assign(bin_from=prob_bin(quotes.p, delta), p_s=quotes.p * quotes.seconds, y_s=quotes.y * quotes.seconds)
+        .groupby("bin_from", as_index=False)
+        .agg(seconds=("seconds", "sum"), p_s=("p_s", "sum"), y_s=("y_s", "sum"),
+             contracts=("ticker", "nunique"), meetings=("event_ticker", "nunique"))
+        .assign(contract_hours=lambda d: d.seconds / 3600, mean_p=lambda d: d.p_s / d.seconds,
+                observed=lambda d: d.y_s / d.seconds)
+        .assign(bin=lambda d: [bin_label(lo, delta) for lo in d.bin_from])
+        [["bin", "bin_from", "contract_hours", "contracts", "meetings", "mean_p", "observed"]]
+    )
+
+
+@app.function
+def bucket_summary(tables, weight, meetings):
+    """One row per time-to-maturity bucket of binned `tables`: total `weight`, meetings, weighted mean forecast and
+    share YES, and the binned calibration error, the weighted mean of |share YES − mean forecast| across bins."""
+    rows = []
+    for name, t in tables.groupby("bucket", sort=False):
+        w = t[weight]
+        rows.append({
+            "bucket": name, weight: w.sum(), "meetings": meetings[name],
+            "mean_forecast": (t.mean_p * w).sum() / w.sum(),
+            "share_yes": (t.observed * w).sum() / w.sum(),
+            "calibration_error": ((t.observed - t.mean_p).abs() * w).sum() / w.sum(),
+        })
+    return pd.DataFrame(rows)
+
+
+@app.function
+def reliability_by_bucket_chart(table, size, size_title, title):
+    """Reliability diagram with one line per time-to-maturity bucket, darker = closer to the meeting."""
+    scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
+    buckets = list(TTM_BUCKETS)
+    diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
+        x="p:Q", y="p:Q")
+    base = alt.Chart(table).encode(
+        x=alt.X("mean_p:Q", title="Predicted", axis=alt.Axis(format="%"), scale=scale),
+        y=alt.Y("observed:Q", title="Observed", axis=alt.Axis(format="%"), scale=scale),
+        color=alt.Color("bucket:N", title="Days to meeting", sort=buckets,
+                        scale=alt.Scale(domain=buckets, range=TTM_COLORS)),
+    )
+    lines = base.mark_line(strokeWidth=2).encode(order="mean_p:Q")
+    points = base.mark_circle(size=80, opacity=1, stroke="#fcfcfb", strokeWidth=2).encode(
+        tooltip=[alt.Tooltip("bucket:N", title="Days to meeting"), alt.Tooltip("bin:N", title="Bin"),
+                 alt.Tooltip(f"{size}:Q", format=",.0f", title=size_title), "contracts:Q", "meetings:Q",
+                 alt.Tooltip("mean_p:Q", format=".3f", title="Mean forecast"),
+                 alt.Tooltip("observed:Q", format=".3f", title="Share YES")],
+    )
+    return (diagonal + lines + points).properties(width=380, height=380, title=title)
+
+
+@app.function
+def reliability_chart(table, size, size_title, title):
     """Reliability diagram: share settled YES against the mean forecast per bin, with the 45° line."""
     scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
     diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
@@ -85,14 +139,13 @@ def reliability_chart(table, size, size_title, title, side=380, size_domain=None
     points = alt.Chart(table).mark_circle(color="#2a78d6", opacity=0.9, stroke="#fcfcfb", strokeWidth=2).encode(
         x=alt.X("mean_p:Q", title="Predicted", axis=alt.Axis(format="%"), scale=scale),
         y=alt.Y("observed:Q", title="Observed", axis=alt.Axis(format="%"), scale=scale),
-        size=alt.Size(f"{size}:Q", title=size_title,
-                      scale=alt.Scale(range=[60, 600], **({"domain": size_domain} if size_domain else {}))),
+        size=alt.Size(f"{size}:Q", title=size_title, scale=alt.Scale(range=[60, 600])),
         tooltip=[alt.Tooltip("bin:N", title="Bin"),
                  alt.Tooltip(f"{size}:Q", format=",.0f", title=size_title), "contracts:Q", "meetings:Q",
                  alt.Tooltip("mean_p:Q", format=".3f", title="Mean forecast"),
                  alt.Tooltip("observed:Q", format=".3f", title="Share YES")],
     )
-    return (diagonal + points).properties(width=side, height=side, title=title)
+    return (diagonal + points).properties(width=380, height=380, title=title)
 
 
 @app.cell(hide_code=True)
@@ -238,21 +291,23 @@ def reliability_md():
     forecasts in the bin. Forecasts of the same meeting are correlated, so a bin's effective sample is closer
     to its `meetings` count than to its `forecasts` count.
 
+    The forecasts are 4pm snapshots taken 1, 2, 3, 5, 7, 10, 14, 21, 30, 45 and 60 days before each meeting
+    (`TTMS` in the setup cell), closer together near the meeting, where prices move most. A horizon group pools
+    its snapshots, so each contract appears once per day in the group: 1–21 days counts every contract up to
+    eight times, with the same outcome each time.
+
     Bins are $[p_k, p_k + \delta)$ except at the ends, which are split at 1¢ and 99¢: below 1¢ and from 99¢ up are
     contracts at the tick floor (0¢ bid / 1¢ ask, or no ask), which say little about beliefs, so they get bins of
     their own and the priced longshots and favorites sit in $[0.01, \delta)$ and $[1 - \delta, 0.99)$. In the main
-    specification the floor contracts are excluded, so those two bins are empty.
+    specification the floor contracts are excluded, so those two bins hold only contracts priced at exactly 1¢ or
+    99¢ that the rescaling to $q$ moved just across the edge.
     """)
     return
 
 
 @app.cell
 def controls():
-    horizon = mo.ui.dropdown(
-        options={**HORIZON_GROUPS, **{f"{h} day{'s' if h > 1 else ''}": [h] for h in TTMS}},
-        value="1–21 days (main)",
-        label="Days to meeting",
-    )
+    horizon = mo.ui.dropdown(options=HORIZON_GROUPS, value="1–21 days (main)", label="Days to meeting")
     bin_width = mo.ui.dropdown(options={"5¢": 0.05, "10¢": 0.10, "20¢": 0.20}, value="10¢", label="Bin width δ")
     mo.hstack([horizon, bin_width], justify="start", gap=2)
     return bin_width, horizon
@@ -273,9 +328,11 @@ def ttm_md():
     mo.md(r"""
     ### By time to maturity
 
-    The same diagram for each time-to-maturity bucket side by side, to see whether the pattern changes as the
-    meeting approaches. Bin width and the analysis choices apply; point sizes are on one scale across panels.
-    Buckets further out hold fewer meetings (see the summary), so their points are noisier.
+    The same diagram with one line per time-to-maturity bucket (1–7, 8–21 and 22–60 days before the meeting;
+    `TTM_BUCKETS` in the setup cell), darker closer to the meeting, to see whether the pattern changes as the
+    meeting approaches. The analysis choices apply. Bins default to 20¢, wider than above: split three ways, the
+    middle bins hold only a few meetings each, and at 10¢ single outcomes swing them between 0% and 100%. Points
+    are not sized: hover for a bin's forecasts and meetings.
 
     The summary's **calibration error** is the forecast-weighted average gap between the share settled YES and the
     mean forecast across bins, $\sum_k \frac{n_k}{N}\,\lvert \bar y_k - \bar p_k \rvert$ (0 = on the diagonal). It
@@ -285,33 +342,27 @@ def ttm_md():
 
 
 @app.cell
-def ttm_reliability(bin_width, sample):
-    _tables = {name: reliability_table(sample[sample.ttm.isin(hs)], bin_width.value)
-               for name, hs in TTM_BUCKETS.items()}
-    _tables = {name: t for name, t in _tables.items() if len(t)}
-    _domain = [1, max(t.forecasts.max() for t in _tables.values())]
-    _charts = alt.concat(
-        *[reliability_chart(t, "forecasts", "Forecasts", name, side=230, size_domain=_domain)
-          for name, t in _tables.items()],
-        columns=3,
-    ).resolve_scale(size="shared")
+def ttm_controls():
+    ttm_bin_width = mo.ui.dropdown(options={"10¢": 0.10, "20¢": 0.20, "25¢": 0.25}, value="20¢",
+                                   label="Bin width δ (time-to-maturity charts)")
+    ttm_bin_width
+    return (ttm_bin_width,)
 
-    _summary = pd.DataFrame([{
-        "bucket": name,
-        "days": ", ".join(str(h) for h in TTM_BUCKETS[name]),
-        "forecasts": int(t.forecasts.sum()),
-        "meetings": sample[sample.ttm.isin(TTM_BUCKETS[name])].event_ticker.nunique(),
-        "mean_forecast": (t.mean_p * t.forecasts).sum() / t.forecasts.sum(),
-        "share_yes": (t.observed * t.forecasts).sum() / t.forecasts.sum(),
-        "calibration_error": ((t.observed - t.mean_p).abs() * t.forecasts).sum() / t.forecasts.sum(),
-    } for name, t in _tables.items()])
-    _bins = pd.concat([t.assign(bucket=name) for name, t in _tables.items()])[
-        ["bucket", "bin", "forecasts", "contracts", "meetings", "mean_p", "observed"]]
-    mo.vstack([
-        _charts,
-        mo.ui.tabs({"Summary by bucket": mo.ui.table(_summary.round(4), selection=None),
-                    "Every bin": mo.ui.table(_bins.round(4), selection=None, page_size=25)}),
-    ])
+
+@app.cell
+def ttm_reliability(sample, ttm_bin_width):
+    _by_bucket = {name: sample[sample.ttm.between(lo, hi)] for name, (lo, hi) in TTM_BUCKETS.items()}
+    _tables = pd.concat([reliability_table(d, ttm_bin_width.value).assign(bucket=name)
+                         for name, d in _by_bucket.items()])
+    _summary = bucket_summary(_tables, "forecasts", {name: d.event_ticker.nunique() for name, d in _by_bucket.items()})
+    mo.hstack([
+        reliability_by_bucket_chart(_tables, "forecasts", "Forecasts", "Reliability by days to meeting"),
+        mo.ui.tabs({
+            "Summary by bucket": mo.ui.table(_summary.round(4), selection=None),
+            "Every bin": mo.ui.table(_tables[["bucket", "bin", "forecasts", "contracts", "meetings", "mean_p",
+                                              "observed"]].round(4), selection=None, page_size=25),
+        }),
+    ], widths=[1, 1])
     return
 
 
@@ -338,7 +389,12 @@ def minutes_md():
 @app.cell
 def minutes(con, queries):
     minute_quotes = con.execute(queries["minute_quotes"], {"days_before": MINUTE_WINDOW_DAYS}).df()
-    return (minute_quotes,)
+    minute_quotes_by_bucket = con.execute(queries["minute_quotes_by_bucket"], {
+        "buckets": list(TTM_BUCKETS),
+        "lo": [lo for lo, _ in TTM_BUCKETS.values()],
+        "hi": [hi for _, hi in TTM_BUCKETS.values()],
+    }).df()
+    return minute_quotes, minute_quotes_by_bucket
 
 
 @app.cell
@@ -351,20 +407,44 @@ def minute_controls():
 @app.cell
 def minute_reliability(bin_width, drop_wide, minute_quotes):
     _q = minute_quotes[minute_quotes.spread <= 0.20] if drop_wide.value else minute_quotes
-    reliability_minutes = (
-        _q.assign(bin_from=prob_bin(_q.p, bin_width.value), p_s=_q.p * _q.seconds, y_s=_q.y * _q.seconds)
-        .groupby("bin_from", as_index=False)
-        .agg(seconds=("seconds", "sum"), p_s=("p_s", "sum"), y_s=("y_s", "sum"),
-             contracts=("ticker", "nunique"), meetings=("event_ticker", "nunique"))
-        .assign(contract_hours=lambda d: d.seconds / 3600, mean_p=lambda d: d.p_s / d.seconds,
-                observed=lambda d: d.y_s / d.seconds)
-        .assign(bin=lambda d: [bin_label(lo, bin_width.value) for lo in d.bin_from])
-        [["bin", "bin_from", "contract_hours", "contracts", "meetings", "mean_p", "observed"]]
-    )
+    reliability_minutes = minute_reliability_table(_q, bin_width.value)
     mo.hstack([
         reliability_chart(reliability_minutes, "contract_hours", "Contract-hours",
                           f"Reliability · every minute, 0–{MINUTE_WINDOW_DAYS} days"),
         mo.ui.table(reliability_minutes.drop(columns="bin_from").round(4), selection=None),
+    ], widths=[1, 1])
+    return
+
+
+@app.cell(hide_code=True)
+def minute_ttm_md():
+    mo.md("""
+    #### Every minute, by time to maturity (descriptive)
+
+    The minute data split into the same time-to-maturity buckets as above, by the ET calendar day each quote was in
+    force: a quote that spans a bucket boundary counts toward both, for the time it spent in each. The meeting day
+    itself is in no bucket, so unlike the chart above this view stops at midnight before the meeting. The
+    time-to-maturity bin width and the spread checkbox apply.
+    """)
+    return
+
+
+@app.cell
+def minute_ttm_reliability(drop_wide, minute_quotes_by_bucket, ttm_bin_width):
+    _q = minute_quotes_by_bucket[minute_quotes_by_bucket.spread <= 0.20] if drop_wide.value else minute_quotes_by_bucket
+    _by_bucket = {name: _q[_q.bucket == name] for name in TTM_BUCKETS}
+    _tables = pd.concat([minute_reliability_table(d, ttm_bin_width.value).assign(bucket=name)
+                         for name, d in _by_bucket.items()])
+    _summary = bucket_summary(_tables, "contract_hours",
+                              {name: d.event_ticker.nunique() for name, d in _by_bucket.items()})
+    mo.hstack([
+        reliability_by_bucket_chart(_tables, "contract_hours", "Contract-hours",
+                                    "Reliability by days to meeting · every minute"),
+        mo.ui.tabs({
+            "Summary by bucket": mo.ui.table(_summary.round(4), selection=None),
+            "Every bin": mo.ui.table(_tables[["bucket", "bin", "contract_hours", "contracts", "meetings", "mean_p",
+                                              "observed"]].round(4), selection=None, page_size=25),
+        }),
     ], widths=[1, 1])
     return
 

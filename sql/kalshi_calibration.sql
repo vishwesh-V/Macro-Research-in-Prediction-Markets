@@ -84,3 +84,51 @@ FROM q
 WHERE t1 > t0
 GROUP BY ALL
 ORDER BY event_ticker, ticker, p;
+
+
+-- name: minute_quotes_by_bucket
+-- Like minute_quotes, split by time-to-maturity bucket: for each bucket, the seconds each quote was in force on
+-- ET calendar days $lo..$hi before the meeting (inclusive). A quote spanning a bucket boundary is split between
+-- the two. The meeting day itself (day 0) falls in no bucket.
+-- Parameters: $buckets (names), $lo and $hi (first and last day before the meeting, one per bucket).
+WITH m AS (
+    SELECT
+        ticker,
+        event_ticker,
+        meeting_date,
+        CAST(result = 'yes' AS INTEGER) AS y,
+        close_time
+    FROM markets
+    WHERE status = 'finalized'
+),
+b AS (
+    SELECT unnest($buckets) AS bucket, unnest($lo) AS lo, unnest($hi) AS hi
+),
+q AS (
+    SELECT
+        m.ticker,
+        m.event_ticker,
+        m.meeting_date,
+        m.y,
+        (c.bid_close + c.ask_close) / 2 AS p,
+        c.ask_close - c.bid_close AS spread,
+        c.ts AS t0,
+        least(coalesce(lead(c.ts) OVER (PARTITION BY c.ticker ORDER BY c.ts), m.close_time), m.close_time) AS t1
+    FROM candles_clean c
+    JOIN m USING (ticker)
+    WHERE c.ts < m.close_time
+),
+split AS (
+    SELECT
+        q.*,
+        b.bucket,
+        greatest(q.t0, (q.meeting_date - b.hi)::TIMESTAMP AT TIME ZONE 'America/New_York') AS s0,
+        least(q.t1, (q.meeting_date - b.lo + 1)::TIMESTAMP AT TIME ZONE 'America/New_York') AS s1
+    FROM q
+    CROSS JOIN b
+)
+SELECT bucket, event_ticker, ticker, y, p, spread, sum(epoch(s1 - s0)) AS seconds
+FROM split
+WHERE s1 > s0
+GROUP BY ALL
+ORDER BY bucket, event_ticker, ticker, p;
