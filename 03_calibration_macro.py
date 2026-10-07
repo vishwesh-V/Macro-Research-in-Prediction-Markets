@@ -225,6 +225,36 @@ def data():
 
 
 @app.cell(hide_code=True)
+def contracts_md():
+    mo.md("""
+    ## 0 · The contracts
+
+    Every contract of the four series as Kalshi lists it, newest release first: the strike, Kalshi's label, whether it
+    settled YES, the contracts traded, the date it was listed, and how many trades and 1-minute candles of it are in
+    `data/` (zero while the download has not reached it). The summary counts them per series.
+    """)
+    return
+
+
+@app.cell
+def contracts(con, queries):
+    _all = con.execute(queries["contracts"], {"series": list(SERIES)}).df()
+    _all.insert(0, "series", _all.pop("series_ticker").map(SERIES))
+    _summary = (_all.groupby("series", sort=False)
+                .agg(releases=("event_ticker", "nunique"), contracts=("ticker", "size"),
+                     settled=("result", "count"), first_release=("release_date", "min"),
+                     last_release=("release_date", "max"), volume=("volume", "sum"),
+                     with_data=("candles_downloaded", lambda c: int((c > 0).sum())),
+                     trades=("trades_downloaded", "sum"), candles=("candles_downloaded", "sum"))
+                .reset_index())
+    mo.ui.tabs({
+        "Summary by series": mo.ui.table(_summary, selection=None),
+        "Every contract": mo.ui.table(_all, selection=None, page_size=25),
+    })
+    return
+
+
+@app.cell(hide_code=True)
 def panel_md():
     mo.md("""
     ## 1 · The forecast panel

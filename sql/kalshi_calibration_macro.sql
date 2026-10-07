@@ -75,3 +75,35 @@ FROM d
 WHERE days_to_release BETWEEN 1 AND $max_days
 GROUP BY days_to_release
 ORDER BY days_to_release;
+
+
+-- name: contracts
+-- Every contract of $series as listed by Kalshi, settled or not, with its release date and
+-- how much of its data is downloaded so far. Parameter: $series.
+WITH c AS (
+    SELECT
+        *,
+        CAST(max(close_time) OVER (PARTITION BY event_ticker) AT TIME ZONE 'America/New_York' AS DATE)
+            AS release_date
+    FROM all_markets
+    WHERE series_ticker IN (SELECT unnest($series))
+),
+t AS (SELECT ticker, count(*) AS trades FROM trades_raw GROUP BY ticker),
+k AS (SELECT ticker, count(*) AS candles FROM candles_raw GROUP BY ticker)
+SELECT
+    c.series_ticker,
+    c.event_ticker,
+    c.release_date,
+    c.ticker,
+    c.strike,
+    c.outcome,
+    c.status,
+    c.result,
+    c.volume,
+    CAST(c.open_time AT TIME ZONE 'America/New_York' AS DATE) AS listed,
+    coalesce(t.trades, 0) AS trades_downloaded,
+    coalesce(k.candles, 0) AS candles_downloaded
+FROM c
+LEFT JOIN t USING (ticker)
+LEFT JOIN k USING (ticker)
+ORDER BY c.series_ticker, c.release_date DESC, c.strike;
