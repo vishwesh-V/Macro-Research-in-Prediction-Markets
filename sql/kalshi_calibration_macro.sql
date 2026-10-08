@@ -4,7 +4,8 @@
 -- Macro series (CPI, payrolls) are threshold ladders: each release is one event with
 -- contracts "above k" for several strikes k, several of which can settle YES. Every
 -- contract closes at 8:29 ET on the release day, a minute before the 8:30 release; the
--- release date of an event is its latest close.
+-- release date of an event is its latest close. Contracts that settled other than YES or NO
+-- (e.g. KXCPICORE-25DEC, voided with result 'scalar') are left out.
 
 
 -- name: forecasts
@@ -26,7 +27,7 @@ WITH c AS (
         CAST(max(close_time) OVER (PARTITION BY event_ticker) AT TIME ZONE 'America/New_York' AS DATE)
             AS release_date
     FROM all_markets
-    WHERE status = 'finalized' AND series_ticker IN (SELECT unnest($series))
+    WHERE status = 'finalized' AND result IN ('yes', 'no') AND series_ticker IN (SELECT unnest($series))
 ),
 grid AS (
     SELECT
@@ -62,7 +63,7 @@ WITH c AS (
         CAST(max(close_time) OVER (PARTITION BY event_ticker) AT TIME ZONE 'America/New_York' AS DATE)
             AS release_date
     FROM all_markets
-    WHERE status = 'finalized' AND series_ticker IN (SELECT unnest($series))
+    WHERE status = 'finalized' AND result IN ('yes', 'no') AND series_ticker IN (SELECT unnest($series))
 ),
 d AS (
     SELECT date_diff('day', CAST(t.created_time AT TIME ZONE 'America/New_York' AS DATE), c.release_date)

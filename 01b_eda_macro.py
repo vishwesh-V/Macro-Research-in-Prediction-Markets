@@ -222,7 +222,8 @@ def quality_md():
     ## 4 · Quote quality
 
     **Left:** median end-of-day spread by price level, per series, 1–60 days before the release; contracts priced
-    near 0 or 1 are usually quoted tightly at the floor, the middle is where spreads are widest. **Right:** ladder
+    near 0 or 1 are usually quoted tightly at the floor. The 40–60¢ bins are dominated by empty books: a 0¢ bid and
+    a 100¢ ask give a mid of exactly 50¢ and a 100¢ spread, so their median spread is not a quoted market's. **Right:** ladder
     consistency. P(above $k$) must fall as $k$ rises, so a higher strike priced above a lower one is a violation:
     the share of release-days with at least one, and with one larger than 2¢ (beyond quote noise).
     """)

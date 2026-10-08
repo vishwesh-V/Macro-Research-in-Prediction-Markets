@@ -142,7 +142,8 @@ def fetch_markets(series):
     rows = []
     for s in series:
         # List contracts by series, not event by event: /events omits some events whose
-        # contracts the markets endpoints still serve (e.g. FEDDECISION-24JAN).
+        # contracts the markets endpoints still serve (so far only untraded or voided ones:
+        # FEDDECISION-24JAN, a duplicate of FEDDECISION-24JAN31, and KXCPICORE-25DEC).
         titles = {e["event_ticker"]: e.get("title") for e in paginate("/events", "events", {"series_ticker": s})}
         n = 0
         for historical, path in ((False, "/markets"), (True, "/historical/markets")):
