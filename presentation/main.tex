@@ -1,9 +1,11 @@
 \documentclass[aspectratio=169, 11pt, t]{beamer}
 \usepackage{beamerthemesloan}
 \usepackage{appendixnumberbeamer}
+\graphicspath{{figures/}}
 
 \title{Prediction Markets as Macro Data}
 \subtitle{Kalshi vs.\ fed funds futures}
+\question{Are Kalshi's prices on FOMC decisions good forecasts, and how do they compare with fed funds futures?}
 % TODO: check names and order
 \author{Andres Blanco Prada \\ Panos Koutsoukos \\ Connor Rippert \\ Vish}
 \date{Progress update \textbar\ October 2026}
@@ -14,37 +16,6 @@
 \begin{frame}[noframenumbering]
   \titlepage
 \end{frame}}
-
-% =========================================================================
-\section{Motivation}
-% =========================================================================
-\begin{frame}{Kalshi has become a deep market for Fed decisions}
-  \framesubtitle{Our question: are these prices good forecasts, and are they better than fed funds futures?}
-  \source{01\_eda\_kalshi.py}
-  \begin{columns}[T]
-    \begin{column}{0.68\textwidth}
-      \begin{tikzpicture}
-        \begin{axis}[sloan, width=\linewidth, height=5.6cm,
-            ymode=log, log origin=infty, ymin=0.05, ymax=200,
-            ytick={0.1,1,10,100}, yticklabels={0.1,1,10,100},
-            xmin=2023.2, xmax=2026.85, xtick={2024,2025,2026},
-            xticklabels={2024,2025,2026},
-            ylabel={Contracts traded per month (M)}]
-          \addplot[ybar, bar width=2.2pt, fill=sloanred, draw=none, line width=0pt]
-            table[x=x, y=mcontracts] {data/fed_monthly_volume.dat};
-          \draw[sloangray, densely dotted, line width=0.6pt] (axis cs:2025.25,0.05) -- (axis cs:2025.25,200);
-          \node[note, anchor=north east] at (axis cs:2025.22,150) {April 2025:\\volume up $\sim$10$\times$};
-        \end{axis}
-      \end{tikzpicture}
-    \end{column}
-    \begin{column}{0.28\textwidth}
-      \vspace{6pt}
-      \keyfig{620M}{contracts traded on FOMC decisions since 2023}
-      \keyfig{28}{settled FOMC meetings in the sample}
-      \keyfig{1\textcent}{median bid--ask spread}
-    \end{column}
-  \end{columns}
-\end{frame}
 
 % =========================================================================
 \section{Replication}
@@ -82,55 +53,32 @@
   \framesubtitle{Share of contracts that paid out, by price, 1--21 days before the meeting}
   \source{02\_calibration\_kalshi.py}
   \begin{columns}[T]
-    \begin{column}{0.5\textwidth}
+    \begin{column}{0.6\textwidth}
       \centering
-      \begin{tikzpicture}
-        \begin{axis}[sloan, width=6.3cm, height=6.3cm, xmin=0, xmax=1, ymin=0, ymax=1.03,
-            xtick={0,0.25,0.5,0.75,1}, ytick={0,0.25,0.5,0.75,1}, xmajorgrids,
-            xlabel={Price (implied probability)}, ylabel={Share that paid out}]
-          \addplot[sloangray, densely dashed, line width=0.6pt, domain=0:1] {x};
-          \addplot[only marks, mark=*, draw=sloanred, fill=sloanred, fill opacity=0.45,
-              visualization depends on={1.6+4.6*sqrt(\thisrow{n}/136) \as \msize},
-              scatter, scatter/use mapped color={draw=sloanred, fill=sloanred},
-              scatter/@pre marker code/.append style={/tikz/mark size=\msize}]
-            table[x=p, y=obs] {data/fed_reliability.dat};
-          \node[note, anchor=west] at (axis cs:0.16,0.06) {longshots pay\\less than priced};
-          \node[note, anchor=north east] at (axis cs:0.70,1.0) {favorites pay\\more than priced};
-        \end{axis}
-      \end{tikzpicture}
+      \includegraphics[height=5.6cm]{reliability_fed}
     \end{column}
-    \begin{column}{0.4\textwidth}
-      \vspace{14pt}
+    \begin{column}{0.36\textwidth}
+      \vspace{10pt}
       \keyfig{0.5\%}{payout rate of contracts priced 1--10\textcent{} (avg.\ price 3.1\textcent)}
       \keyfig{99.3\%}{payout rate of contracts priced 90--99\textcent{} (avg.\ 95.3\textcent)}
-      {\footnotesize\color{sloangray}Bubble size = forecasts. 632 forecasts, 28 meetings. Middle bins hold 2--6 meetings each. Formal test still to run.\par}
+      {\footnotesize\color{sloangray}Bubble size = forecasts. 632 forecasts, 28 meetings. Middle bins hold 2--6 meetings each.\par}
     \end{column}
   \end{columns}
 \end{frame}
 
-\begin{frame}{Accuracy fades with horizon, and single surprises dominate}
-  \framesubtitle{Log score of the full 5-outcome distribution, mean over meetings (lower is better)}
+\begin{frame}{A calibration regression confirms the pattern}
+  \framesubtitle{$P(\text{YES}) = \Lambda(\alpha + \beta\,\operatorname{logit} p)$; calibrated means $\alpha = 0$, $\beta = 1$}
   \source{02\_calibration\_kalshi.py}
   \begin{columns}[T]
-    \begin{column}{0.68\textwidth}
-      \begin{tikzpicture}
-        \begin{axis}[sloan, width=\linewidth, height=5.6cm, ymin=0, ymax=0.46,
-            xtick=data, xticklabels from table={data/fed_logscore_horizon.dat}{h},
-            xlabel={Days before the meeting}, ylabel={Log score},
-            ytick={0,0.1,0.2,0.3,0.4}, yticklabel style={/pgf/number format/fixed}]
-          \addplot[kalshiline, mark=*, mark size=1.8pt] table[x=i, y=logscore] {data/fed_logscore_horizon.dat};
-          \addplot[only marks, mark=*, mark size=1.8pt, draw=sloanred, fill=white, line width=1pt]
-            coordinates {(9,0.273) (10,0.413)};
-          \node[note, anchor=south] at (axis cs:4,0.205) {Sep 2024\\50bp cut};
-          \node[note, anchor=north east, text=sloangray] at (axis cs:8.6,0.44) {hollow points:\\18 and 8 meetings};
-        \end{axis}
-      \end{tikzpicture}
+    \begin{column}{0.6\textwidth}
+      \centering
+      \includegraphics[height=5.6cm]{fitted_by_horizon}
     \end{column}
-    \begin{column}{0.28\textwidth}
-      \vspace{6pt}
-      \keyfig{0.07 $\rightarrow$ 0.28}{log score, 1 day vs.\ 30 days out}
-      \keyfig{0.05}{median at 1--21 days, vs.\ mean 0.14}
-      {\footnotesize\color{sloangray}Uniform guess over 5 outcomes: 1.61.\par}
+    \begin{column}{0.36\textwidth}
+      \vspace{10pt}
+      \keyfig{1.75}{calibration slope $\beta$ at 1--21 days (SE 0.45; bootstrap 95\% CI 1.22--3.54)}
+      \keyfig{p = 0.01}{joint test of calibration (cluster bootstrap)}
+      {\footnotesize\color{sloangray}$\beta > 1$: favorites win more than priced, longshots less. Errors clustered by meeting (28). No significant change after the May 2025 liquidity jump.\par}
     \end{column}
   \end{columns}
 \end{frame}
@@ -159,7 +107,7 @@
     \begin{column}{0.5\textwidth}
       \centering
       \begin{tikzpicture}
-        \begin{axis}[sloan, sloanbars, width=6.6cm, height=3.7cm, ybar, bar width=14pt, ymin=0, ymax=1.12,
+        \begin{axis}[sloan, width=6.6cm, height=3.7cm, ybar, sloanbars, bar width=14pt, ymin=0, ymax=1.12,
             symbolic x coords={Cut 50+, Cut 25, Hold, Hike 25, Hike 50+}, xtick=data,
             ytick={0,0.5,1}, ylabel={Probability},
             nodes near coords, nodes near coords style={font=\scriptsize, color=ink,
@@ -181,36 +129,41 @@
 % =========================================================================
 \section{Kalshi vs.\ futures}
 % =========================================================================
-\begin{frame}{Kalshi tracks futures and is slightly more accurate to 30 days}
-  \framesubtitle{Both read at 15:00 ET each day and scored against the actual decision}
+\begin{frame}{Kalshi is calibrated like futures and slightly more accurate}
+  \framesubtitle{Hold and $\pm$25bp outcomes, both read at 15:00 ET and scored against the decision}
   \source{03\_fedfunds\_vs\_kalshi.py}
-  \centering
-  \begin{tikzpicture}
-    \begin{groupplot}[group style={group size=2 by 1, horizontal sep=1.5cm},
-        sloan, width=7.2cm, height=4.85cm]
-      \nextgroupplot[title={\footnotesize\bfseries One meeting: Sep 2024, P(50bp cut)},
-          xmin=-50, xmax=0.5, ymin=0, ymax=1, xlabel={Days before the meeting},
-          ytick={0,0.25,0.5,0.75,1}, legend style={at={(0.36,0.98)}, anchor=north west}]
-        \addplot[kalshiline, line width=1pt, no marks] table[x=t, y=mid] {data/sep24_kalshi_c50.dat};
-        \addlegendentry{Kalshi}
-        \addplot[benchline, no marks, const plot] table[x=t, y=p_ff] {data/sep24_ff_c50.dat};
-        \addlegendentry{Futures}
-        \node[note, anchor=north east] at (axis cs:-1,0.97) {Outcome:\\50bp cut};
-      \nextgroupplot[title={\footnotesize\bfseries All meetings: Brier score (lower is better)},
-          ymin=0, ymax=0.08, xtick=data, xticklabels from table={data/ff_vs_kalshi_scores.dat}{h},
-          xlabel={Days before the meeting},
-          ytick={0,0.02,0.04,0.06,0.08}, yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},
-          legend pos=north west]
-        \addplot[kalshiline, mark=*, mark size=1.6pt] table[x=i, y=brier_k] {data/ff_vs_kalshi_scores.dat};
-        \addlegendentry{Kalshi}
-        \addplot[benchline, mark=square*, mark size=1.4pt, mark options={solid}] table[x=i, y=brier_ff] {data/ff_vs_kalshi_scores.dat};
-        \addlegendentry{Futures}
-        \draw[sloangray, densely dotted, line width=0.5pt] (axis cs:3.5,0) -- (axis cs:3.5,0.08);
-        \node[note, anchor=north, text=sloangray, align=center] at (axis cs:4.5,0.079) {fewer\\meetings};
-    \end{groupplot}
-  \end{tikzpicture}
+  \begin{columns}[T]
+    \begin{column}{0.6\textwidth}
+      \centering
+      \includegraphics[height=5.6cm]{ff_vs_kalshi_fitted}
+    \end{column}
+    \begin{column}{0.36\textwidth}
+      \vspace{10pt}
+      \keyfig{2.14 vs.\ 2.48}{calibration slope $\beta$, Kalshi vs.\ futures (1--21 days): both under-confident}
+      \keyfig{0.039 vs.\ 0.046}{Brier score at 30 days, Kalshi vs.\ futures}
+      {\footnotesize\color{sloangray}Kalshi scores better at 1--30 days, futures at 45--60 days (few meetings). Kalshi prices moves beyond 25bp higher.\par}
+    \end{column}
+  \end{columns}
+\end{frame}
 
-  {\scriptsize\color{sloangray}Kalshi also puts more weight on moves beyond 25bp: +0.4pp the day before, +1.5pp at 31--60 days.\par}
+% =========================================================================
+\section{Lead--lag}
+% =========================================================================
+\begin{frame}{Intraday, futures lead Kalshi by about five minutes}
+  \framesubtitle{Correlation of 5-minute changes in the expected move, Mar--Oct 2026, 5 meetings}
+  \source{04\_leadlag\_fedfunds\_kalshi.py}
+  \begin{columns}[T]
+    \begin{column}{0.64\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{leadlag_xcorr}
+    \end{column}
+    \begin{column}{0.32\textwidth}
+      \vspace{4pt}
+      \keyfig{0.22}{same 5 minutes: most co-movement is simultaneous}
+      \keyfig{p $<$ 0.001}{past futures moves predict Kalshi (Granger; p = 0.06 the other way)}
+      \keyfig{16\%}{of a large futures move shows up in Kalshi within 15 minutes}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 % =========================================================================
@@ -225,18 +178,18 @@
     \begin{column}{0.47\textwidth}
       {\color{sloanred}\bfseries\small Questions}\par\vspace{4pt}
       \begin{itemize}\footnotesize
-        \item \textbf{RQ1 Calibration.} Are Kalshi prices rational forecasts? Favorite--longshot bias? Better than futures and surveys? \emph{In progress.}
-        \item \textbf{RQ2 Price discovery.} How fast do prices absorb CPI, payrolls and FOMC news vs.\ futures? \emph{Data ready.}
+        \item \textbf{RQ1 Calibration.} Are Kalshi prices rational forecasts? Favorite--longshot bias? Better than futures and surveys? \emph{First results in.}
+        \item \textbf{RQ2 Price discovery.} How fast do prices absorb CPI, payrolls and FOMC news vs.\ futures? \emph{Lead--lag started.}
         \item \textbf{RQ3 Forecasting.} Use Kalshi distributions to predict CPI, unemployment and GDP. \emph{Not started.}
       \end{itemize}
     \end{column}
     \begin{column}{0.47\textwidth}
       {\color{sloanred}\bfseries\small Next steps}\par\vspace{4pt}
       \begin{itemize}\footnotesize
-        \item Favorite--longshot regression, errors clustered by meeting.
-        \item Formal Kalshi vs.\ futures test on per-meeting scores (e.g.\ Diebold--Mariano), split at April 2025.
-        \item Rerun the futures comparison on refreshed candles (meetings after Sep 2025).
-        \item RQ2 event study on 1-minute data around 8:30 and 14:00 ET.
+        \item Lead--lag around FOMC statements (14:00 ET) vs.\ quiet times; extend the intraday futures sample before March 2026.
+        \item Information shares (Hasbrouck) next to the Granger tests.
+        \item Formal Kalshi vs.\ futures score test (e.g.\ Diebold--Mariano).
+        \item Rerun the daily futures comparison on refreshed candles (meetings after Sep 2025).
         \item Add SPF and Bloomberg consensus benchmarks for CPI and payrolls.
       \end{itemize}
     \end{column}
@@ -265,9 +218,18 @@
   \raggedright
   \begin{itemize}\footnotesize
     \item 10.4M one-minute candles. 100\% of 2,155 settled contracts match Kalshi's reported volume within $\pm$1\%.
-    \item Benchmark: Bloomberg FF1--FF13, EFFR and target range, daily 2000--2026.
+    \item Futures: Bloomberg FF1--FF13, EFFR and target range, daily 2000--2026; 1-minute bid/ask bars Mar--Oct 2026.
     \item Fed outcomes: 19 holds, 5 cuts of 25bp, 1 cut of 50bp (Sep 2024), 3 hikes of 25bp.
   \end{itemize}
+\end{frame}
+
+\begin{frame}{Kalshi has become a deep market for Fed decisions}
+  \framesubtitle{Contracts traded per month, all KXFEDDECISION meetings (log scale)}
+  \source{01\_eda\_kalshi.py}
+  \centering
+  \includegraphics[width=0.85\linewidth]{monthly_volume}
+
+  {\footnotesize\color{sloangray}620M contracts since 2023; volume rose about 10$\times$ in spring 2025. Median bid--ask spread 1\textcent.\par}
 \end{frame}
 
 \begin{frame}{Literature: what is known and what we add}
@@ -331,70 +293,61 @@
 \end{frame}
 
 \section{Calibration}
-\begin{frame}{Minute-level reliability shows the same S-shape}
-  \framesubtitle{Descriptive only: raw mid quotes, 0--60 days, includes meeting day}
+\begin{frame}{Calibration regression: estimates}
+  \framesubtitle{Logit of outcome on logit of price; meeting-clustered SEs; 999-draw cluster bootstrap}
   \source{02\_calibration\_kalshi.py}
-  \centering
-  \begin{tikzpicture}
-    \begin{axis}[sloan, width=6.3cm, height=6.0cm, xmin=0, xmax=1, ymin=0, ymax=1.03,
-        xtick={0,0.25,0.5,0.75,1}, ytick={0,0.25,0.5,0.75,1}, xmajorgrids,
-        xlabel={Price}, ylabel={Share that paid out}]
-      \addplot[sloangray, densely dashed, line width=0.6pt, domain=0:1] {x};
-      \addplot[kalshiline, mark=*, mark size=1.6pt] table[x=p, y=obs] {data/fed_reliability_minute.dat};
-    \end{axis}
-  \end{tikzpicture}
+  \centering\scriptsize
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lrrrrrr}
+    \toprule
+    Horizon & Obs.\ / meetings & $\alpha$ (SE) & $\beta$ (SE) & $\beta$ 95\% CI (boot) & p($\beta$=1) & p joint (boot) \\
+    \midrule
+    1--21 days (main) & 454 / 28 & 0.141 (0.030) & 1.751 (0.453) & [1.22, 3.54] & 0.097 & 0.010 \\
+    30 days & 78 / 27 & 0.165 (0.062) & 1.723 (0.533) & [1.11, 2.77] & 0.175 & 0.008 \\
+    45--60 days & 100 / 18 & 0.445 (0.186) & 3.133 (1.058) & [1.97, 13.66] & 0.044 & 0.189 \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{12pt}
+  \raggedright
+  \begin{itemize}\footnotesize
+    \item $\beta > 1$ at every horizon: under-confident prices, the favorite--longshot pattern.
+    \item $\alpha > 0$ is significant: the YES side of the normalized buckets pays slightly more than priced.
+    \item Sample: normalized prices at 16:00 ET, tick-floor contracts excluded; 632 of 1,384 forecasts.
+  \end{itemize}
 \end{frame}
 
-\begin{frame}{Calibration error grows with time to the meeting}
-  \framesubtitle{Weighted calibration error, 20\textcent{} bins; buckets hold equal shares of trades}
-  \source{02\_calibration\_kalshi.py}
-  \centering
-  \begin{tikzpicture}
-    \begin{axis}[sloan, width=11cm, height=5.4cm, ybar, sloanbars, bar width=12pt, ymin=0, ymax=0.08,
-        xtick=data, xticklabels from table={data/fed_calerr_ttm.dat}{bucket},
-        xlabel={Days before the meeting}, ylabel={Calibration error},
-        yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},
-        legend pos=north west]
-      \addplot[fill=sloanred, draw=none] table[x=i, y=daily] {data/fed_calerr_ttm.dat};
-      \addlegendentry{Daily snapshots (main spec)}
-      \addplot[fill=bench, draw=none] table[x=i, y=minute] {data/fed_calerr_ttm.dat};
-      \addlegendentry{Minute level (descriptive)}
-    \end{axis}
-  \end{tikzpicture}
-\end{frame}
-
-\begin{frame}{Scores by horizon group, and the meetings that drive them}
+\begin{frame}{No detectable change after the liquidity jump}
+  \framesubtitle{Fitted calibration curves, 1--21 days: 16 meetings before May 2025, 12 from May 2025}
   \source{02\_calibration\_kalshi.py}
   \begin{columns}[T]
-    \begin{column}{0.48\textwidth}
-      \centering\footnotesize
-      \begin{tabular}{lrrr}
-        \toprule
-        Horizon & Log mean & Log median & Brier mean \\
-        \midrule
-        1--21 days & 0.136 & 0.051 & 0.061 \\
-        30 days & 0.284 & 0.172 & 0.144 \\
-        45--60 days & 0.316 & 0.224 & 0.152 \\
-        \bottomrule
-      \end{tabular}
+    \begin{column}{0.6\textwidth}
+      \centering
+      \includegraphics[height=5.6cm]{fitted_by_regime}
     \end{column}
-    \begin{column}{0.48\textwidth}
-      \centering\footnotesize
-      \begin{tabular}{llr}
-        \toprule
-        Meeting & Horizon & Log loss \\
-        \midrule
-        Sep 2024 (50bp cut) & 7 days & 1.74 \\
-        Sep 2024 & 30 days & 1.13 \\
-        Sep 2026 (25bp hike) & 21 days & 1.11 \\
-        Sep 2024 & 21 days & 0.88 \\
-        Dec 2025 & 21 days & 0.78 \\
-        \bottomrule
-      \end{tabular}
+    \begin{column}{0.36\textwidth}
+      \vspace{10pt}
+      \keyfig{1.49 $\rightarrow$ 2.35}{$\beta$ before vs.\ from May 2025}
+      \keyfig{p = 0.19}{difference in $\beta$ (joint test p = 0.36, bootstrap)}
+      {\footnotesize\color{sloangray}A large p-value means no detectable change, not no change. The regimes also differ in policy: mostly holds before, cuts after.\par}
     \end{column}
   \end{columns}
-  \vspace{12pt}
-  {\footnotesize\color{sloangray}Per-contract binary log loss on the right. Days within a meeting are highly correlated, so the effective sample is about 28 meetings.\par}
+\end{frame}
+
+\begin{frame}{Accuracy fades with horizon, and single surprises dominate}
+  \framesubtitle{Log loss per meeting by days to meeting; labelled points are the largest misses}
+  \source{02\_calibration\_kalshi.py}
+  \centering
+  \includegraphics[height=5.2cm]{logloss_per_meeting}
+
+  {\footnotesize\color{sloangray}Mean log score 0.07 at 1 day, 0.28 at 30 days; median at 1--21 days 0.05 vs.\ mean 0.14.\par}
+\end{frame}
+
+\begin{frame}{Minute-level reliability shows the same S-shape}
+  \framesubtitle{Descriptive only: raw mid quotes every minute, 0--60 days, includes meeting day}
+  \source{02\_calibration\_kalshi.py}
+  \centering
+  \includegraphics[height=5.6cm]{reliability_minute}
 \end{frame}
 
 \begin{frame}{Specification fixed before any significance test}
@@ -410,7 +363,7 @@
     \begin{column}{0.47\textwidth}
       \begin{itemize}\footnotesize
         \item Stale quotes kept and flagged; drop-stale as robustness. No spread filter.
-        \item Scores per contract (log loss, favorite--longshot test) and per meeting (log score, Brier).
+        \item Scores per contract (log loss, calibration regression) and per meeting (log score, Brier).
         \item Minute-level results are descriptive only.
         \item Voided contracts and one untraded duplicate Fed event dropped.
       \end{itemize}
@@ -421,37 +374,31 @@
 \end{frame}
 
 \section{CPI \& payrolls}
-\begin{frame}{CPI and payroll ladders are close to calibrated}
-  \framesubtitle{All four series, 1--21 days before the release; 18,049 forecasts, 203 releases}
+\begin{frame}{CPI is under-confident, payrolls over-confident}
+  \framesubtitle{1--21 days before the release; 18,049 forecasts, 203 releases; SEs clustered by release date}
   \source{03\_calibration\_macro.py}
   \begin{columns}[T]
     \begin{column}{0.5\textwidth}
       \centering
-      \begin{tikzpicture}
-        \begin{axis}[sloan, width=6.2cm, height=6.0cm, xmin=0, xmax=1, ymin=0, ymax=1.03,
-            xtick={0,0.25,0.5,0.75,1}, ytick={0,0.25,0.5,0.75,1}, xmajorgrids,
-            xlabel={Price}, ylabel={Share that paid out}]
-          \addplot[sloangray, densely dashed, line width=0.6pt, domain=0:1] {x};
-          \addplot[only marks, mark=*, draw=sloanred, fill=sloanred, fill opacity=0.45,
-              visualization depends on={1.6+4.6*sqrt(\thisrow{n}/4520) \as \msize},
-              scatter, scatter/use mapped color={draw=sloanred, fill=sloanred},
-              scatter/@pre marker code/.append style={/tikz/mark size=\msize}]
-            table[x=p, y=obs] {data/macro_reliability.dat};
-        \end{axis}
-      \end{tikzpicture}
+      \includegraphics[height=5.1cm]{macro_by_series}
     \end{column}
     \begin{column}{0.46\textwidth}
-      \begin{tikzpicture}
-        \begin{axis}[sloan, width=\linewidth, height=4.2cm, xbar, sloanbars, bar width=9pt,
-            xmin=0, xmax=0.085, ytick=data, yticklabels from table={data/macro_calerr_series.dat}{series},
-            xlabel={Calibration error}, ymajorgrids=false, xmajorgrids,
-            xticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},
-            nodes near coords, nodes near coords style={font=\tiny, color=ink,
-              /pgf/number format/.cd, fixed, precision=3}]
-          \addplot[fill=sloanred, draw=none] table[x=calerr, y=i] {data/macro_calerr_series.dat};
-        \end{axis}
-      \end{tikzpicture}
-      {\footnotesize\color{sloangray}Payrolls is hardest: 1-day log loss 0.52 vs.\ 0.20--0.25 for CPI. Ladders are not monotone on 18--63\% of release-days.\par}
+      \centering\footnotesize
+      \begin{tabular}{lrr}
+        \toprule
+        Series & $\beta$ (SE) & p($\beta$=1) \\
+        \midrule
+        CPI m/m & 1.20 (0.10) & 0.043 \\
+        Core CPI m/m & 1.25 (0.11) & 0.025 \\
+        CPI y/y & 1.40 (0.19) & 0.033 \\
+        Payrolls & 0.75 (0.10) & 0.015 \\
+        \midrule
+        CPI pooled & 1.28 (0.10) & 0.005 \\
+        All series & 1.11 (0.07) & 0.123 \\
+        \bottomrule
+      \end{tabular}
+      \par\vspace{8pt}\raggedright
+      {\footnotesize\color{sloangray}Reliability by series (left). Every $\alpha$ is insignificant. Ladder contracts are not exclusive, so prices are not normalized.\par}
     \end{column}
   \end{columns}
 \end{frame}
@@ -470,6 +417,22 @@
     \item Expected move $x$ in 25bp steps: with $n = \lfloor x \rfloor$, $p = x - n$, the move is $n$ steps w.p.\ $1-p$ and $n+1$ steps w.p.\ $p$.
     \item Checks: all 2,909 (meeting, date) pairs sum to 1; Methods A and B differ by a median of 1.4bp.
   \end{itemize}
+\end{frame}
+
+\begin{frame}{One meeting up close: September 2024}
+  \framesubtitle{Probability of a cut larger than 25bp; the Fed cut 50bp}
+  \source{03\_fedfunds\_vs\_kalshi.py}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[sloan, width=12cm, height=5.5cm,
+        xmin=-50, xmax=0.5, ymin=0, ymax=1, xlabel={Days before the meeting},
+        ytick={0,0.25,0.5,0.75,1}, legend style={at={(0.36,0.98)}, anchor=north west}]
+      \addplot[kalshiline, line width=1pt, no marks] table[x=t, y=mid] {data/sep24_kalshi_c50.dat};
+      \addlegendentry{Kalshi (6-hourly mid)}
+      \addplot[benchline, no marks, const plot] table[x=t, y=p_ff] {data/sep24_ff_c50.dat};
+      \addlegendentry{Futures (daily)}
+    \end{axis}
+  \end{tikzpicture}
 \end{frame}
 
 \begin{frame}{Kalshi and futures agree closely near the meeting}
@@ -494,17 +457,7 @@
   \framesubtitle{Hold and $\pm$25bp outcomes, 1--30 days pooled; bins from 0.3 to 0.6 hold 2--5 meetings}
   \source{03\_fedfunds\_vs\_kalshi.py}
   \centering
-  \begin{tikzpicture}
-    \begin{axis}[sloan, width=6.3cm, height=6.0cm, xmin=0, xmax=1, ymin=0, ymax=1.03,
-        xtick={0,0.25,0.5,0.75,1}, ytick={0,0.25,0.5,0.75,1}, xmajorgrids,
-        xlabel={Price}, ylabel={Share that paid out}, legend pos=north west]
-      \addplot[sloangray, densely dashed, line width=0.6pt, domain=0:1, forget plot] {x};
-      \addplot[kalshiline, mark=*, mark size=1.6pt] table[x=p_k, y=obs_k] {data/ff_vs_kalshi_reliability.dat};
-      \addlegendentry{Kalshi}
-      \addplot[benchline, mark=square*, mark size=1.4pt, mark options={solid}] table[x=p_ff, y=obs_ff] {data/ff_vs_kalshi_reliability.dat};
-      \addlegendentry{Futures}
-    \end{axis}
-  \end{tikzpicture}
+  \includegraphics[height=5.6cm]{ff_vs_kalshi_reliab}
 \end{frame}
 
 \begin{frame}{Scores: Kalshi vs.\ futures by horizon}
@@ -524,6 +477,54 @@
 
   \vspace{10pt}
   {\color{sloangray}Bold: lower (better) score. 28 meetings at 1--21 days, 8 at 60 days. Probabilities clipped to [0.005, 0.995].\par}
+\end{frame}
+
+\section{Lead--lag}
+\begin{frame}{Lead--lag: data and method}
+  \source{04\_leadlag\_fedfunds\_kalshi.py}
+  \begin{itemize}\footnotesize
+    \item \textbf{Futures:} Bloomberg 1-minute bid/ask bars, 30 Mar -- 12 Oct 2026, contracts Mar--Dec 2026; expected move per minute with the daily method (A or B per meeting). Median spread 0.5bp.
+    \item \textbf{Kalshi:} expected move $\sum_k q_k \cdot \text{move}_k$ from 1-minute bucket mids, rescaled to sum to 1, carried onto the CME minute grid.
+    \item \textbf{Alignment:} Bloomberg bars are labelled by start minute, so they are shifted one minute to match Kalshi. Without it the futures appear to lead by exactly one minute.
+    \item \textbf{Validation:} at 15:00 the minute series matches daily settlements: 135 days, correlation 0.998, median gap 0.27bp.
+    \item \textbf{Tests} on 5-minute changes (95\% of futures and 92\% of Kalshi changes are zero): cross-correlations, Granger regressions with 6 lags clustered by session, and paths after the largest 0.1\% of 1-minute moves.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{The two markets track the same expectations}
+  \framesubtitle{Expected move at the 16 Sep 2026 meeting, every 15 minutes (CME hours)}
+  \source{04\_leadlag\_fedfunds\_kalshi.py}
+  \centering
+  \includegraphics[width=0.92\linewidth]{leadlag_sep26_path}
+\end{frame}
+
+\begin{frame}{Granger tests: futures predict Kalshi, much less the reverse}
+  \source{04\_leadlag\_fedfunds\_kalshi.py}
+  \centering\footnotesize
+  \begin{tabular}{lrrr}
+    \toprule
+    Question & Wald $\chi^2$ (6 df) & p-value & Sum of cross lags (SE) \\
+    \midrule
+    Do past futures moves predict Kalshi? & 30.30 & $<$0.001 & 0.133 (0.030) \\
+    Do past Kalshi moves predict futures? & 12.02 & 0.062 & 0.279 (0.090) \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{10pt}
+  \raggedright
+  {\footnotesize 37,632 five-minute changes, 140 sessions (all CME hours), 6 lags = 30 minutes, SEs clustered by session.\par
+  \vspace{6pt}\color{sloangray}Caveats: about 140 days and five meetings; mostly-zero changes; different tick sizes (futures 0.25--0.5bp, Kalshi 0.25bp per cent); quotes, not trades.\par}
+\end{frame}
+
+\begin{frame}{After a large move, the other market follows only partly}
+  \framesubtitle{Cumulative change divided by the size of the move, top 0.1\% of 1-minute moves}
+  \source{04\_leadlag\_fedfunds\_kalshi.py}
+  \centering
+  \includegraphics[height=4.9cm]{leadlag_after_futures}\hspace{0.6cm}
+  \includegraphics[height=4.9cm]{leadlag_after_kalshi}
+
+  \vspace{4pt}
+  {\footnotesize\color{sloangray}Futures moves (210, avg.\ 1.29bp): Kalshi follows 16\% within 15 minutes, 20\% within 2 hours. Kalshi moves (195, avg.\ 0.58bp): Kalshi builds to 160\% and futures follow 49\% within 2 hours.\par}
 \end{frame}
 
 \end{document}

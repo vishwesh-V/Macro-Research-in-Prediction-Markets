@@ -1,14 +1,15 @@
 # Progress-update deck (Beamer, MIT Sloan style)
 
-6 main slides plus an appendix. Every chart is drawn with pgfplots from the small text files in `data/`,
-so numbers and labels can be edited directly in Overleaf.
+6 main slides (replication, calibration ×2, fed funds futures, Kalshi vs. futures, lead–lag) plus an appendix.
 
 | File | What it is |
 |---|---|
 | `main.tex` | The slides. Main deck first, appendix after `\sloanappendix`. |
 | `beamerthemesloan.sty` | Theme: colors, section bar at the top, footer with source and progress bar. |
-| `data/*.dat` | Chart data. |
-| `build_data.py` | Regenerates the data files computed from raw data (see below). |
+| `figures/*.pdf` | Charts exported from the marimo notebooks by `export_figures.py`. |
+| `data/*.dat` | Data for the charts drawn in LaTeX (pgfplots): replication, Sep 2024 example, futures gap. |
+| `export_figures.py` | Exports the marimo charts, recolored to the deck palette (Kalshi red, futures charcoal). |
+| `build_data.py` | Regenerates the computed `data/*.dat` files. |
 | `main.pdf` | Compiled deck. |
 
 ## Open in Overleaf
@@ -22,13 +23,19 @@ so numbers and labels can be edited directly in Overleaf.
 - Each slide's `\source{...}` puts the notebook it comes from in the footer.
 - `\section{...}` names drive the navigation bar at the top. Keep main-deck sections short.
 - Colors are defined once at the top of `beamerthemesloan.sty` (`sloanred`, `bench`, ...).
-- Author names are on line 8 of `main.tex`. Check them.
+- Author names are on line 10 of `main.tex`. Check them.
+- Numbers in the text (key figures, tables) were copied from the notebooks' saved outputs; update them
+  by hand after a rerun.
 
-## Where the numbers come from
+## Refreshing the charts after rerunning a notebook
 
-- Computed from raw data by `build_data.py`: `fed_monthly_volume`, `dkw_mae_curve`, `hairs`,
-  `realized_target`, `sep24_*`. Run from the repository root: `uv run presentation/build_data.py`.
-- Copied from the last saved run of the marimo notebooks (`__marimo__/session/*.json`): all other files.
-  `02_calibration_kalshi.py` → `fed_*`; `03_calibration_macro.py` → `macro_*`;
-  `03_fedfunds_vs_kalshi.py` → `ff_vs_kalshi_*`; `kalshi_fed/data/validation.json` → `dkw_horizon_bars`.
-  Rerunning a notebook does not update these; copy the new values in by hand.
+Charts are read from the saved session of each notebook (`__marimo__/session/<notebook>.py.json`),
+so rerun and save the notebook in marimo first. Then, from the repository root:
+
+```
+uv run presentation/export_figures.py
+uv run presentation/build_data.py
+```
+
+`export_figures.py` lists which notebook cell each figure comes from (`FIGURES`). If a cell id changes,
+update it there.

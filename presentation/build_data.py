@@ -1,17 +1,17 @@
 # /// script
-# dependencies = ["duckdb", "pandas", "pyarrow"]
+# dependencies = ["pandas"]
 # ///
 """Write the chart data files in presentation/data/ that are computed from raw data.
 
-The other files in presentation/data/ were copied by hand from the saved outputs of the
-marimo notebooks (02_calibration_kalshi, 03_calibration_macro, 03_fedfunds_vs_kalshi).
+dkw_horizon_bars.dat and ff_vs_kalshi_gap.dat were copied by hand from kalshi_fed/data/validation.json
+and the saved output of 03_fedfunds_vs_kalshi. Charts taken from the marimo notebooks are exported
+by export_figures.py instead.
 
 Run from the repository root:  uv run presentation/build_data.py
 """
 import json
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,18 +27,6 @@ def decimal_year(s):
     days = (pd.to_datetime((y + 1).astype(str) + "-01-01") - start).dt.days
     return (y + (t - start).dt.days / days).values
 
-
-# Monthly contracts traded on the Fed decision markets (Oct 2026 is partial and dropped)
-con = duckdb.connect()
-vol = con.execute(f"""
-    SELECT date_trunc('month', created_time)::DATE AS month, sum(count) / 1e6 AS mcontracts
-    FROM read_parquet('{REPO}/data/kalshi_trades.parquet')
-    WHERE ticker LIKE 'KXFEDDECISION%' OR ticker LIKE 'FEDDECISION%'
-    GROUP BY 1 ORDER BY 1
-""").df()
-vol = vol[pd.to_datetime(vol.month) < "2026-10-01"]
-vol["x"] = decimal_year(vol.month.astype(str)) + 1 / 24
-vol[["x", "mcontracts"]].to_csv(OUT / "fed_monthly_volume.dat", sep=" ", index=False, float_format="%.4f")
 
 # DKW replication: mean absolute error of the implied rate by days to meeting
 kf = REPO / "kalshi_fed" / "data"
@@ -76,7 +64,7 @@ for cell in sess["cells"]:
 meeting = pd.Timestamp("2024-09-18")
 for df in (ff, ks):
     df["t"] = (pd.to_datetime(df.ts) - meeting).dt.total_seconds() / 86400
-for move, tag in [("Cut 25", "c25"), ("Cut >25", "c50")]:
+for move, tag in [("Cut >25", "c50")]:
     f = ff[ff.move == move].sort_values("t")
     f[["t", "p_ff"]].to_csv(OUT / f"sep24_ff_{tag}.dat", sep=" ", index=False, float_format="%.4f")
     k = ks[(ks.move == move) & (ks.spread <= 0.20) & (ks.t <= 0)].sort_values("t")

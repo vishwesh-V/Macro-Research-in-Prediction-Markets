@@ -78,6 +78,8 @@
 }
 
 % ---- Title page -----------------------------------------------------------
+\newcommand{\sloanquestion}{}
+\newcommand{\question}[1]{\renewcommand{\sloanquestion}{#1}}  % research question under the title
 \setbeamertemplate{title page}{%
   \begin{tikzpicture}[remember picture, overlay]
     \fill[sloanred] (current page.north west) rectangle ([xshift=0.34\paperwidth]current page.south west);
@@ -88,7 +90,8 @@
     \node[anchor=north west, text width=0.56\paperwidth, align=left]
       at ([xshift=0.39\paperwidth, yshift=-2.1cm]current page.north west) {%
       {\color{sloanred}\scriptsize\bfseries\MakeUppercase{\insertsubtitle}}\\[8pt]
-      {\color{ink}\LARGE\bfseries\inserttitle}\\[14pt]
+      {\color{ink}\LARGE\bfseries\inserttitle}\\[8pt]
+      {\color{sloangray}\small\sloanquestion}\\[14pt]
       {\color{ink}\small\insertauthor}\\[4pt]
       {\color{sloangray}\footnotesize\insertdate}};
   \end{tikzpicture}}
