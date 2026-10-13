@@ -149,21 +149,36 @@
 % =========================================================================
 \section{Kalshi vs.\ futures}
 % =========================================================================
-\begin{frame}{Kalshi is calibrated like futures and slightly more accurate}
-  \framesubtitle{Hold and $\pm$25bp outcomes, both read at 15:00 ET and scored against the decision}
+\begin{frame}{Kalshi tracks futures and is slightly more accurate to 30 days}
+  \framesubtitle{Both read at 15:00 ET each day and scored against the actual decision}
   \source{03\_fedfunds\_vs\_kalshi.py}
-  \begin{columns}[T]
-    \begin{column}{0.6\textwidth}
-      \centering
-      \includegraphics[height=5.6cm]{ff_vs_kalshi_fitted}
-    \end{column}
-    \begin{column}{0.36\textwidth}
-      \vspace{10pt}
-      \keyfig{2.14 vs.\ 2.48}{calibration slope $\beta$, Kalshi vs.\ futures (1--21 days): both under-confident}
-      \keyfig{0.039 vs.\ 0.046}{Brier score at 30 days, Kalshi vs.\ futures}
-      {\footnotesize\color{sloangray}Kalshi scores better at 1--30 days, futures at 45--60 days (few meetings). Kalshi prices moves beyond 25bp higher.\par}
-    \end{column}
-  \end{columns}
+  \centering
+  \begin{tikzpicture}
+    \begin{groupplot}[group style={group size=2 by 1, horizontal sep=1.5cm},
+        sloan, width=7.2cm, height=4.85cm]
+      \nextgroupplot[title={\footnotesize\bfseries One meeting: Sep 2024, P(50bp cut)},
+          xmin=-50, xmax=0.5, ymin=0, ymax=1, xlabel={Days before the meeting},
+          ytick={0,0.25,0.5,0.75,1}, legend style={at={(0.36,0.98)}, anchor=north west}]
+        \addplot[kalshiline, line width=1pt, no marks] table[x=t, y=mid] {data/sep24_kalshi_c50.dat};
+        \addlegendentry{Kalshi}
+        \addplot[benchline, no marks, const plot] table[x=t, y=p_ff] {data/sep24_ff_c50.dat};
+        \addlegendentry{Futures}
+        \node[note, anchor=north east] at (axis cs:-1,0.97) {Outcome:\\50bp cut};
+      \nextgroupplot[title={\footnotesize\bfseries All meetings: Brier score (lower is better)},
+          ymin=0, ymax=0.08, xtick=data, xticklabels from table={data/ff_vs_kalshi_scores.dat}{h},
+          xlabel={Days before the meeting},
+          ytick={0,0.02,0.04,0.06,0.08}, yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},
+          legend pos=north west]
+        \addplot[kalshiline, mark=*, mark size=1.6pt] table[x=i, y=brier_k] {data/ff_vs_kalshi_scores.dat};
+        \addlegendentry{Kalshi}
+        \addplot[benchline, mark=square*, mark size=1.4pt, mark options={solid}] table[x=i, y=brier_ff] {data/ff_vs_kalshi_scores.dat};
+        \addlegendentry{Futures}
+        \draw[sloangray, densely dotted, line width=0.5pt] (axis cs:3.5,0) -- (axis cs:3.5,0.08);
+        \node[note, anchor=north, text=sloangray, align=center] at (axis cs:4.5,0.079) {fewer\\meetings};
+    \end{groupplot}
+  \end{tikzpicture}
+
+  {\scriptsize\color{sloangray}Kalshi also puts more weight on moves beyond 25bp: +0.4pp the day before, +1.5pp at 31--60 days.\par}
 \end{frame}
 
 % =========================================================================
@@ -480,20 +495,21 @@
   \end{itemize}
 \end{frame}
 
-\begin{frame}{One meeting up close: September 2024}
-  \framesubtitle{Probability of a cut larger than 25bp; the Fed cut 50bp}
+\begin{frame}{Kalshi and futures are similarly under-confident}
+  \framesubtitle{Hold and $\pm$25bp outcomes, both read at 15:00 ET and scored against the decision}
   \source{03\_fedfunds\_vs\_kalshi.py}
-  \centering
-  \begin{tikzpicture}
-    \begin{axis}[sloan, width=12cm, height=5.5cm,
-        xmin=-50, xmax=0.5, ymin=0, ymax=1, xlabel={Days before the meeting},
-        ytick={0,0.25,0.5,0.75,1}, legend style={at={(0.36,0.98)}, anchor=north west}]
-      \addplot[kalshiline, line width=1pt, no marks] table[x=t, y=mid] {data/sep24_kalshi_c50.dat};
-      \addlegendentry{Kalshi (6-hourly mid)}
-      \addplot[benchline, no marks, const plot] table[x=t, y=p_ff] {data/sep24_ff_c50.dat};
-      \addlegendentry{Futures (daily)}
-    \end{axis}
-  \end{tikzpicture}
+  \begin{columns}[T]
+    \begin{column}{0.6\textwidth}
+      \centering
+      \includegraphics[height=5.6cm]{ff_vs_kalshi_fitted}
+    \end{column}
+    \begin{column}{0.36\textwidth}
+      \vspace{10pt}
+      \keyfig{2.14 vs.\ 2.48}{calibration slope $\beta$, Kalshi vs.\ futures (1--21 days): both under-confident}
+      \keyfig{0.039 vs.\ 0.046}{Brier score at 30 days, Kalshi vs.\ futures}
+      {\footnotesize\color{sloangray}Kalshi scores better at 1--30 days, futures at 45--60 days (few meetings). Kalshi prices moves beyond 25bp higher.\par}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 \begin{frame}{Kalshi and futures agree closely near the meeting}
