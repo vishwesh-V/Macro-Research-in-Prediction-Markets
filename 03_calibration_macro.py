@@ -8,7 +8,7 @@ import marimo
 __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
-with app.setup:
+with app.setup(hide_code=True):
     import re
     from pathlib import Path
 
@@ -41,14 +41,14 @@ with app.setup:
     TTM_COLORS = ["#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef"]  # one blue, darker = closer to release
 
 
-@app.function
+@app.function(hide_code=True)
 def bin_edges(delta):
     """Bin edges in steps of delta, with the outer bins split at 1¢ and 99¢: a mid below 1¢ or from 99¢ up
     is a contract at the tick floor (0¢ bid / 1¢ ask, or no ask), not a priced forecast."""
     return np.unique(np.round(np.concatenate([np.arange(0, 1, delta), [0.01, 0.99, 1.0]]), 6))
 
 
-@app.function
+@app.function(hide_code=True)
 def prob_bin(p, delta):
     """Lower edge of the bin [edge_k, edge_k+1) that contains each probability."""
     edges = bin_edges(delta)
@@ -56,14 +56,14 @@ def prob_bin(p, delta):
     return edges[np.searchsorted(edges, np.round(p, 9), side="right") - 1]
 
 
-@app.function
+@app.function(hide_code=True)
 def bin_label(lower, delta):
     """'[lower, upper)' for the bin that starts at `lower`."""
     edges = bin_edges(delta)
     return f"[{lower:.2f}, {edges[np.searchsorted(edges, lower, side='right')]:.2f})"
 
 
-@app.function
+@app.function(hide_code=True)
 def reliability_table(forecasts, delta):
     """Forecasts per probability bin of width `delta`: mean forecast `f` and share settled YES."""
     return (
@@ -76,7 +76,7 @@ def reliability_table(forecasts, delta):
     )
 
 
-@app.function
+@app.function(hide_code=True)
 def group_summary(tables, field, releases):
     """One row per `field` group of binned `tables`: forecasts, releases, weighted mean forecast and share YES,
     and the binned calibration error, the weighted mean of |share YES − mean forecast| across bins."""
@@ -92,7 +92,7 @@ def group_summary(tables, field, releases):
     return pd.DataFrame(rows)
 
 
-@app.function
+@app.function(hide_code=True)
 def reliability_chart(table, title):
     """Reliability diagram: share settled YES against the mean forecast per bin, with the 45° line."""
     scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
@@ -110,7 +110,7 @@ def reliability_chart(table, title):
     return (diagonal + points).properties(width=380, height=380, title=title)
 
 
-@app.function
+@app.function(hide_code=True)
 def reliability_lines_chart(table, field, domain, colors, legend_title, title):
     """Reliability diagram with one line per `field` value (`domain`, in legend order, colored by `colors`).
     Click a legend entry to highlight it (shift-click for several); the others fade."""
@@ -136,7 +136,7 @@ def reliability_lines_chart(table, field, domain, colors, legend_title, title):
     return (diagonal + lines + points).properties(width=380, height=380, title=title)
 
 
-@app.function
+@app.function(hide_code=True)
 def ce_heatmap(long, row, row_title, row_order, stat_title, title):
     """Heatmap of log loss: one row per `row` value, one column per horizon, darker = higher loss (log scale).
     `long` has columns `row`, `ttm`, `value` and `n` (forecasts behind the cell)."""
@@ -153,7 +153,7 @@ def ce_heatmap(long, row, row_title, row_order, stat_title, title):
     ).properties(width="container", height=alt.Step(28), title=title)
 
 
-@app.function
+@app.function(hide_code=True)
 def equal_trade_buckets(trades_by_day, n):
     """Cut days 1..max into `n` runs of whole days holding about the same number of trades: each cut falls on the
     day whose cumulative share of trades is nearest k/n. Returns {"a–b days": (a, b)}, nearest the release first."""
@@ -201,7 +201,7 @@ def intro():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def data():
     con = duckdb.connect()
     con.execute((ROOT / "sql/kalshi_views.sql").read_text())
@@ -236,7 +236,7 @@ def contracts_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def contracts(con, queries):
     _all = con.execute(queries["contracts"], {"series": list(SERIES)}).df()
     _all.insert(0, "series", _all.pop("series_ticker").map(SERIES))
@@ -267,7 +267,7 @@ def panel_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def panel(forecasts):
     _coverage = (
         forecasts.groupby(["series", "ttm"], sort=False)
@@ -289,7 +289,7 @@ def choices_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def choices():
     series_pick = mo.ui.multiselect(options={label: s for s, label in SERIES.items()}, value=list(SERIES.values()),
                                     label="Series")
@@ -299,7 +299,7 @@ def choices():
     return drop_stale, include_floor, series_pick
 
 
-@app.cell
+@app.cell(hide_code=True)
 def sample(drop_stale, forecasts, include_floor, series_pick):
     # The sample under the chosen settings; `f` is the forecast used from here on.
     mo.stop(not series_pick.value, mo.md("**Pick at least one series.**"))
@@ -330,7 +330,7 @@ def reliability_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def controls():
     horizon = mo.ui.dropdown(options=HORIZON_GROUPS, value="1–21 days (main)", label="Days to release")
     bin_width = mo.ui.dropdown(options={"5¢": 0.05, "10¢": 0.10, "20¢": 0.20}, value="10¢", label="Bin width δ")
@@ -338,7 +338,7 @@ def controls():
     return bin_width, horizon
 
 
-@app.cell
+@app.cell(hide_code=True)
 def reliability(bin_width, horizon, sample):
     _table = reliability_table(sample[sample.ttm.isin(horizon.value)], bin_width.value)
     mo.hstack([
@@ -360,7 +360,7 @@ def series_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def lines_controls():
     lines_bin_width = mo.ui.dropdown(options={"10¢": 0.10, "20¢": 0.20, "25¢": 0.25}, value="20¢",
                                      label="Bin width δ (line charts)")
@@ -368,7 +368,7 @@ def lines_controls():
     return (lines_bin_width,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def by_series(horizon, lines_bin_width, picked, sample):
     _sel = sample[sample.ttm.isin(horizon.value)]
     _by = {SERIES[s]: _sel[_sel.series_ticker == s] for s in picked}
@@ -401,7 +401,7 @@ def ttm_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ttm_buckets_cell(con, picked, queries):
     _trades = con.execute(queries["trades_by_day"], {"series": picked, "max_days": MAX_DAYS}).df()
     ttm_buckets = equal_trade_buckets(_trades, N_TTM_BUCKETS)
@@ -416,7 +416,7 @@ def ttm_buckets_cell(con, picked, queries):
     return (ttm_buckets,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ttm_reliability(lines_bin_width, sample, ttm_buckets):
     _by = {name: sample[sample.ttm.between(lo, hi)] for name, (lo, hi) in ttm_buckets.items()}
     _by = {name: d for name, d in _by.items() if len(d)}
@@ -445,14 +445,14 @@ def ce_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_controls():
     ce_stat = mo.ui.dropdown(options={"Mean": "mean", "Median": "median"}, value="Mean", label="Statistic")
     ce_stat
     return (ce_stat,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_series(ce_stat, picked, sample):
     _stat = ce_stat.value
     _order = [SERIES[s] for s in picked]
@@ -478,7 +478,7 @@ def ce_bin_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_bin(bin_width, ce_stat, sample):
     _delta = bin_width.value
     _binned = sample.assign(bin_from=prob_bin(sample.f, _delta))
@@ -508,7 +508,7 @@ def release_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def release_scores(forecasts, sample):
     _per = sample.groupby(["series", "event_ticker", "ttm"], as_index=False).agg(
         log_loss=("log_loss", "mean"), brier=("brier", "mean"))

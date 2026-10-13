@@ -8,7 +8,7 @@ import marimo
 __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
-with app.setup:
+with app.setup(hide_code=True):
     import re
     from pathlib import Path
 
@@ -46,7 +46,7 @@ def columns_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def columns():
     _files = {
         "kalshi_markets": "One row per contract: one FOMC meeting × one rate-move bucket.",
@@ -90,7 +90,7 @@ def columns():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def data():
     con = duckdb.connect()
     con.execute((ROOT / "sql/kalshi_views.sql").read_text())
@@ -125,7 +125,7 @@ def meetings_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def meetings(con):
     meetings = con.sql("SELECT * FROM meeting_summary").df()
     mo.ui.table(meetings, selection=None, page_size=40)
@@ -143,7 +143,7 @@ def liquidity_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def liquidity(con, queries):
     liquidity = con.sql(queries["liquidity_by_month"]).df()
     liquidity["month"] = pd.to_datetime(liquidity["month"]).dt.tz_localize(None)
@@ -175,7 +175,7 @@ def path_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def meeting_picker(meetings):
     meeting_picker = mo.ui.dropdown(
         options={f"{r.meeting_date} · {r.decision or 'open'}": r.event_ticker for r in meetings.itertuples()},
@@ -186,7 +186,7 @@ def meeting_picker(meetings):
     return (meeting_picker,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def path(con, meeting_picker, move_scale, queries):
     path = con.execute(queries["probability_path"], {"event_ticker": meeting_picker.value}).df()
 
@@ -237,7 +237,7 @@ def quality_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def quality(con, queries):
     spreads = con.sql(queries["spread_by_move"]).df()
     sum_mids = con.sql(queries["sum_of_mids"]).df()
@@ -264,7 +264,7 @@ def calibration_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def calibration(con, queries):
     calibration = con.sql(queries["calibration_bins"]).df()
     _diag = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(x="p:Q", y="p:Q")

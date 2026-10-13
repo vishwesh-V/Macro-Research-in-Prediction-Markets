@@ -11,7 +11,7 @@ import marimo
 __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
-with app.setup:
+with app.setup(hide_code=True):
     import calendar
     import re
     from pathlib import Path
@@ -46,7 +46,7 @@ with app.setup:
     alt.data_transformers.disable_max_rows()
 
 
-@app.function
+@app.function(hide_code=True)
 def load_futures(path):
     """Fed funds futures 1-13, EFFR and target range from the Bloomberg pull, cleaned as in Step 0 of the guide.
 
@@ -65,7 +65,7 @@ def load_futures(path):
     return raw[~stale].reset_index(drop=True), raw.loc[stale, "date"]
 
 
-@app.function
+@app.function(hide_code=True)
 def load_fomc(path):
     """FOMC decision dates from the workbook, with the decision in bp for past meetings."""
     f = pd.read_excel(path, "FOMC_Dates")
@@ -75,7 +75,7 @@ def load_fomc(path):
     return f.sort_values("meeting_date").reset_index(drop=True)
 
 
-@app.function
+@app.function(hide_code=True)
 def add_starting_rate(futures, meeting_dates):
     """Starting rate r0 (Step 6): today's range midpoint plus the rolling median EFFR spread.
 
@@ -89,13 +89,13 @@ def add_starting_rate(futures, meeting_dates):
     return futures.assign(spread=futures.effr - midpoint, spread_median=spread_median, r0=midpoint + spread_median)
 
 
-@app.function
+@app.function(hide_code=True)
 def months_ahead(t, d):
     """Calendar months from date t to date d (0 = same month)."""
     return (d.year - t.year) * 12 + d.month - t.month
 
 
-@app.function
+@app.function(hide_code=True)
 def implied_moves(futures, meeting_dates):
     """Steps 1-5 of the guide for every date: one row per (date, upcoming meeting) with the expected
     move x in 25bp steps. Meetings are chained, so each one starts from the previous one's rate.
@@ -136,7 +136,7 @@ def implied_moves(futures, meeting_dates):
     return pd.DataFrame(rows)
 
 
-@app.function
+@app.function(hide_code=True)
 def bucket_prob(x, lo, hi):
     """Probability that the move lands in [lo, hi] steps when x splits over the two nearest steps (Step 7)."""
     n = np.floor(x)
@@ -144,7 +144,7 @@ def bucket_prob(x, lo, hi):
     return np.where((lo <= n) & (n <= hi), 1 - p, 0.0) + np.where((lo <= n + 1) & (n + 1 <= hi), p, 0.0)
 
 
-@app.function
+@app.function(hide_code=True)
 def move_scale(moves):
     """Color scale limited to the outcomes present, in cut-to-hike order."""
     present = [m for m in MOVES if m in set(moves)]
@@ -177,7 +177,7 @@ def intro():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def futures_data():
     mo.stop(not FF_XLSX.exists(), mo.md(f"**Missing `{FF_XLSX.relative_to(ROOT)}`.**"))
     fomc = load_fomc(FF_XLSX)
@@ -189,7 +189,7 @@ def futures_data():
     return fomc, futures, implied, meeting_dates, stale_dates
 
 
-@app.cell
+@app.cell(hide_code=True)
 def kalshi_data():
     mo.stop(
         not CLEAN_CANDLES.exists(),
@@ -209,6 +209,8 @@ def kalshi_data():
         SELECT ticker, event_ticker, meeting_date, move, move_bps, status, result,
                CAST(open_time AT TIME ZONE 'America/New_York' AS DATE) AS open_date
         FROM markets
+        -- FEDDECISION-24JAN is an untraded duplicate of FEDDECISION-24JAN31 that closed on Jan 26.
+        QUALIFY sum(volume) OVER (PARTITION BY event_ticker) > 0
     """).df()
     contracts["meeting_date"] = pd.to_datetime(contracts.meeting_date)
     contracts["open_date"] = pd.to_datetime(contracts.open_date)
@@ -218,7 +220,7 @@ def kalshi_data():
     return con, contracts, events_with_quotes, queries
 
 
-@app.cell
+@app.cell(hide_code=True)
 def lines(contracts, implied, meeting_dates):
     _missing = set(contracts.meeting_date) - set(meeting_dates)
     assert not _missing, f"Kalshi meetings missing from FOMC_Dates: {sorted(_missing)}"
@@ -256,7 +258,7 @@ def checks_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def cleaning(futures, stale_dates):
     _prev = futures.shift(1)
     _new_month = futures.date.dt.to_period("M") != _prev.date.dt.to_period("M")
@@ -275,7 +277,7 @@ def cleaning(futures, stale_dates):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def worked_example(implied):
     _guide = pd.DataFrame({"meeting_date": pd.to_datetime(["2026-09-16", "2026-10-28", "2026-12-09"]),
                            "guide x": [0.921, 0.479, 0.705], "guide method": ["A", "B", "A"]})
@@ -289,7 +291,7 @@ def worked_example(implied):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def sums_and_day_before(fomc, futures_lines, implied):
     _sums = futures_lines.groupby(["event_ticker", "date"]).p_ff.sum()
     _bad_sums = (_sums - 1).abs().gt(1e-9).sum()
@@ -310,7 +312,7 @@ def sums_and_day_before(fomc, futures_lines, implied):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def method_gap(implied):
     _both = implied.dropna(subset=["gap_a_b_bp"]).copy()
     _both["day of month"] = _both.meeting_date.dt.day
@@ -342,7 +344,7 @@ def path_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def path_controls(events_with_quotes, fomc, futures_lines):
     _events = (futures_lines.groupby("event_ticker").meeting_date.first().sort_values().reset_index()
                .merge(fomc[["meeting_date", "decision_bp"]], on="meeting_date", how="left"))
@@ -363,7 +365,7 @@ def path_controls(events_with_quotes, fomc, futures_lines):
     return drop_wide_path, meeting_picker
 
 
-@app.cell
+@app.cell(hide_code=True)
 def path(con, drop_wide_path, futures_lines, meeting_picker, queries):
     _kalshi = con.execute(queries["hourly_path"], {"event_ticker": meeting_picker.value}).df()
     _kalshi["ts"] = pd.to_datetime(_kalshi.ts, utc=True).dt.tz_convert("America/New_York").dt.tz_localize(None)
@@ -410,7 +412,7 @@ def matched_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def matched(con, futures_lines, queries):
     con.register("snapshot_grid", futures_lines[["ticker", "date"]].assign(date=lambda d: d.date.dt.date))
     _snaps = con.execute(queries["snapshots"], {"snapshot_hour": SNAPSHOT_HOUR_ET}).df()
@@ -456,7 +458,7 @@ def scores_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def score_controls():
     score_group = mo.ui.dropdown(options=["Hold and ±25", "Tails (>25bp)", "All buckets"],
                                  value="Hold and ±25", label="Buckets")
@@ -464,7 +466,7 @@ def score_controls():
     return (score_group,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def scores(matched, score_group):
     _settled = matched[matched.status == "finalized"].sort_values("date")
     _grid = (_settled[["ticker", "meeting_date"]].drop_duplicates()
@@ -515,7 +517,7 @@ def reliability_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def reliability(scores_long):
     _s = scores_long[scores_long.ttm <= 30]
     _rel = (

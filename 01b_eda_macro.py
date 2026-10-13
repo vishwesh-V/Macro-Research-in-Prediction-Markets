@@ -8,7 +8,7 @@ import marimo
 __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
-with app.setup:
+with app.setup(hide_code=True):
     import re
     from pathlib import Path
 
@@ -46,7 +46,7 @@ def intro():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def data():
     con = duckdb.connect()
     con.execute((ROOT / "sql/kalshi_views.sql").read_text())
@@ -69,7 +69,7 @@ def coverage_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def coverage(con, queries):
     _cov = con.sql(queries["coverage"]).df()
     _cov.insert(0, "series", _cov.pop("series_ticker").map(SERIES))
@@ -89,7 +89,7 @@ def releases_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def releases(con, queries):
     releases = con.sql(queries["releases"]).df()
     releases.insert(0, "series", releases.series_ticker.map(SERIES))
@@ -116,7 +116,7 @@ def liquidity_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def liquidity(con, queries):
     _liq = con.sql(queries["liquidity_by_month"]).df()
     _liq["series"] = _liq.series_ticker.map(SERIES)
@@ -155,7 +155,7 @@ def path_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def path_controls(releases):
     series_picker = mo.ui.dropdown(options={label: s for s, label in SERIES.items()}, value="CPI MoM",
                                    label="Series")
@@ -163,7 +163,7 @@ def path_controls(releases):
     return (series_picker,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def release_picker_cell(con, releases, series_picker):
     _with_data = set(con.sql("SELECT DISTINCT event_ticker FROM macro_candles").df().event_ticker)
     _rel = releases[(releases.series_ticker == series_picker.value) & releases.event_ticker.isin(_with_data)]
@@ -188,7 +188,7 @@ def release_picker_cell(con, releases, series_picker):
     return release_picker, window
 
 
-@app.cell
+@app.cell(hide_code=True)
 def path(con, queries, release_picker, window):
     _path = con.execute(queries["probability_path"], {"event_ticker": release_picker.value}).df()
     if window.value is not None:
@@ -230,7 +230,7 @@ def quality_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def quality(con, queries):
     _spreads = con.sql(queries["spread_by_price"]).df()
     _spreads["series"] = _spreads.series_ticker.map(SERIES)

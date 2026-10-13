@@ -8,7 +8,7 @@ import marimo
 __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
-with app.setup:
+with app.setup(hide_code=True):
     import re
     from pathlib import Path
 
@@ -37,14 +37,14 @@ with app.setup:
     MINUTE_WINDOW_DAYS = 60  # minute-level reliability: days before the meeting
 
 
-@app.function
+@app.function(hide_code=True)
 def bin_edges(delta):
     """Bin edges in steps of delta, with the outer bins split at 1¢ and 99¢: a mid below 1¢ or from 99¢ up
     is a contract at the tick floor (0¢ bid / 1¢ ask, or no ask), not a priced forecast."""
     return np.unique(np.round(np.concatenate([np.arange(0, 1, delta), [0.01, 0.99, 1.0]]), 6))
 
 
-@app.function
+@app.function(hide_code=True)
 def prob_bin(p, delta):
     """Lower edge of the bin [edge_k, edge_k+1) that contains each probability."""
     edges = bin_edges(delta)
@@ -52,14 +52,14 @@ def prob_bin(p, delta):
     return edges[np.searchsorted(edges, np.round(p, 9), side="right") - 1]
 
 
-@app.function
+@app.function(hide_code=True)
 def bin_label(lower, delta):
     """'[lower, upper)' for the bin that starts at `lower`."""
     edges = bin_edges(delta)
     return f"[{lower:.2f}, {edges[np.searchsorted(edges, lower, side='right')]:.2f})"
 
 
-@app.function
+@app.function(hide_code=True)
 def reliability_table(forecasts, delta):
     """Forecasts per probability bin of width `delta`: mean forecast `f` and share settled YES."""
     return (
@@ -72,7 +72,7 @@ def reliability_table(forecasts, delta):
     )
 
 
-@app.function
+@app.function(hide_code=True)
 def minute_reliability_table(quotes, delta):
     """Time-weighted bins of width `delta`: each quote counts for the seconds it was in force."""
     return (
@@ -87,7 +87,7 @@ def minute_reliability_table(quotes, delta):
     )
 
 
-@app.function
+@app.function(hide_code=True)
 def bucket_summary(tables, weight, meetings):
     """One row per time-to-maturity bucket of binned `tables`: total `weight`, meetings, weighted mean forecast and
     share YES, and the binned calibration error, the weighted mean of |share YES − mean forecast| across bins."""
@@ -103,7 +103,7 @@ def bucket_summary(tables, weight, meetings):
     return pd.DataFrame(rows)
 
 
-@app.function
+@app.function(hide_code=True)
 def reliability_by_bucket_chart(table, buckets, size, size_title, title):
     """Reliability diagram with one line per time-to-maturity bucket (`buckets`, nearest the meeting first),
     darker = closer to the meeting."""
@@ -130,7 +130,7 @@ def reliability_by_bucket_chart(table, buckets, size, size_title, title):
     return (diagonal + lines + points).properties(width=380, height=380, title=title)
 
 
-@app.function
+@app.function(hide_code=True)
 def ce_heatmap(long, row, row_title, row_order, stat_title, title):
     """Heatmap of log loss: one row per `row` value, one column per horizon, darker = higher loss (log scale).
     `long` has columns `row`, `ttm`, `value` and `n` (forecasts behind the cell)."""
@@ -147,7 +147,7 @@ def ce_heatmap(long, row, row_title, row_order, stat_title, title):
     ).properties(width="container", height=alt.Step(28), title=title)
 
 
-@app.function
+@app.function(hide_code=True)
 def equal_trade_buckets(trades_by_day, n):
     """Cut days 1..max into `n` runs of whole days holding about the same number of trades: each cut falls on the
     day whose cumulative share of trades is nearest k/n. Returns {"a–b days": (a, b)}, nearest the meeting first."""
@@ -160,7 +160,7 @@ def equal_trade_buckets(trades_by_day, n):
     return {f"{lo}–{hi} days": (lo, hi) for lo, hi in edges}
 
 
-@app.function
+@app.function(hide_code=True)
 def reliability_chart(table, size, size_title, title):
     """Reliability diagram: share settled YES against the mean forecast per bin, with the 45° line."""
     scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
@@ -217,7 +217,7 @@ def intro():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def data():
     mo.stop(
         not CLEAN_CANDLES.exists(),
@@ -256,7 +256,7 @@ def panel_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def panel(forecasts):
     _group = {h: g for g, hs in HORIZON_GROUPS.items() for h in hs}
     # One row per meeting-snapshot; q is NULL for every bucket of an incomplete snapshot.
@@ -287,7 +287,7 @@ def choices_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def choices():
     price = mo.ui.radio(options={"Normalized: q = p / Σp (main)": "q", "Raw mid p": "p"},
                         value="Normalized: q = p / Σp (main)", label="Price")
@@ -297,7 +297,7 @@ def choices():
     return drop_stale, include_floor, price
 
 
-@app.cell
+@app.cell(hide_code=True)
 def sample(drop_stale, forecasts, include_floor, price):
     # The contract-level sample under the chosen settings; `f` is the forecast used from here on.
     _keep = forecasts[price.value].notna()
@@ -335,7 +335,7 @@ def reliability_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def controls():
     horizon = mo.ui.dropdown(options=HORIZON_GROUPS, value="1–21 days (main)", label="Days to meeting")
     bin_width = mo.ui.dropdown(options={"5¢": 0.05, "10¢": 0.10, "20¢": 0.20}, value="10¢", label="Bin width δ")
@@ -343,7 +343,7 @@ def controls():
     return bin_width, horizon
 
 
-@app.cell
+@app.cell(hide_code=True)
 def reliability(bin_width, horizon, sample):
     reliability = reliability_table(sample[sample.ttm.isin(horizon.value)], bin_width.value)
     mo.hstack([
@@ -374,7 +374,7 @@ def ttm_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ttm_buckets_cell(con, queries):
     _trades = con.execute(queries["trades_by_day"], {"max_days": MINUTE_WINDOW_DAYS}).df()
     ttm_buckets = equal_trade_buckets(_trades, N_TTM_BUCKETS)
@@ -389,7 +389,7 @@ def ttm_buckets_cell(con, queries):
     return (ttm_buckets,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ttm_controls():
     ttm_bin_width = mo.ui.dropdown(options={"10¢": 0.10, "20¢": 0.20, "25¢": 0.25}, value="20¢",
                                    label="Bin width δ (time-to-maturity charts)")
@@ -397,7 +397,7 @@ def ttm_controls():
     return (ttm_bin_width,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ttm_reliability(sample, ttm_bin_width, ttm_buckets):
     _by_bucket = {name: sample[sample.ttm.between(lo, hi)] for name, (lo, hi) in ttm_buckets.items()}
     _tables = pd.concat([reliability_table(d, ttm_bin_width.value).assign(bucket=name)
@@ -435,7 +435,7 @@ def minutes_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def minutes(con, queries, ttm_buckets):
     minute_quotes = con.execute(queries["minute_quotes"], {"days_before": MINUTE_WINDOW_DAYS}).df()
     minute_quotes_by_bucket = con.execute(queries["minute_quotes_by_bucket"], {
@@ -446,14 +446,14 @@ def minutes(con, queries, ttm_buckets):
     return minute_quotes, minute_quotes_by_bucket
 
 
-@app.cell
+@app.cell(hide_code=True)
 def minute_controls():
     drop_wide = mo.ui.checkbox(value=False, label="Drop quotes with a spread above 20¢")
     drop_wide
     return (drop_wide,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def minute_reliability(bin_width, drop_wide, minute_quotes):
     _q = minute_quotes[minute_quotes.spread <= 0.20] if drop_wide.value else minute_quotes
     reliability_minutes = minute_reliability_table(_q, bin_width.value)
@@ -478,7 +478,7 @@ def minute_ttm_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def minute_ttm_reliability(drop_wide, minute_quotes_by_bucket, ttm_bin_width, ttm_buckets):
     _q = minute_quotes_by_bucket[minute_quotes_by_bucket.spread <= 0.20] if drop_wide.value else minute_quotes_by_bucket
     _by_bucket = {name: _q[_q.bucket == name] for name in ttm_buckets}
@@ -517,14 +517,14 @@ def ce_type_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_controls():
     ce_stat = mo.ui.dropdown(options={"Mean": "mean", "Median": "median"}, value="Mean", label="Statistic")
     ce_stat
     return (ce_stat,)
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_type(ce_stat, sample):
     _stat = ce_stat.value
     _order = sample.sort_values("move_bps").move.unique()
@@ -560,7 +560,7 @@ def ce_meetings_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_meetings(forecasts, sample):
     _decision = forecasts[forecasts.y == 1].groupby("event_ticker").move.first()
     _dates = forecasts.groupby("event_ticker").meeting_date.first()
@@ -610,7 +610,7 @@ def ce_bucket_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def ce_bucket(bin_width, ce_stat, sample):
     _delta = bin_width.value
     _binned = sample.assign(bin_from=prob_bin(sample.f, _delta))
@@ -654,7 +654,7 @@ def meeting_md():
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def meeting_scores(forecasts, price):
     _f = forecasts[forecasts.q.notna()].assign(f=lambda d: d[price.value])
     meeting_scores = (

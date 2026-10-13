@@ -24,7 +24,7 @@ import marimo
 __generated_with = "0.25.0"
 app = marimo.App(width="medium")
 
-with app.setup:
+with app.setup(hide_code=True):
     import threading
     import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -57,7 +57,7 @@ with app.setup:
     RATE_LIMITED = [0]  # count of 429 responses, reported in progress lines
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     mo.md(r"""
     # 00 · Fetch Kalshi data
@@ -79,7 +79,7 @@ def _():
     return
 
 
-@app.function
+@app.function(hide_code=True)
 def throttle():
     with LOCK:
         now = time.monotonic()
@@ -89,7 +89,7 @@ def throttle():
         time.sleep(wait)
 
 
-@app.function
+@app.function(hide_code=True)
 def get(path, params=None, retries=8):
     if not hasattr(THREAD_LOCAL, "s"):
         THREAD_LOCAL.s = requests.Session()
@@ -111,7 +111,7 @@ def get(path, params=None, retries=8):
     raise RuntimeError(f"failed after {retries} tries: {path} {params}")
 
 
-@app.function
+@app.function(hide_code=True)
 def paginate(path, key, params, limit=200):
     out, cursor = [], None
     while True:
@@ -122,12 +122,12 @@ def paginate(path, key, params, limit=200):
             return out
 
 
-@app.function
+@app.function(hide_code=True)
 def num(x):
     return None if x in (None, "") else float(x)
 
 
-@app.function
+@app.function(hide_code=True)
 def field(d, name):
     # Live endpoints suffix keys with _dollars / _fp; historical ones don't.
     d = d or {}
@@ -137,7 +137,7 @@ def field(d, name):
     return None
 
 
-@app.function
+@app.function(hide_code=True)
 def fetch_markets(series):
     rows = []
     for s in series:
@@ -178,7 +178,7 @@ def fetch_markets(series):
     return df.sort_values(["series_ticker", "close_time", "ticker"]).reset_index(drop=True)
 
 
-@app.function
+@app.function(hide_code=True)
 def fetch_trades(ticker, since=None):
     params = {"ticker": ticker, **({"min_ts": since} if since else {})}
     raw = []
@@ -196,7 +196,7 @@ def fetch_trades(ticker, since=None):
     } for t in raw]
 
 
-@app.function
+@app.function(hide_code=True)
 def fetch_candles(m, since=None):
     path = (f"/historical/markets/{m.ticker}/candlesticks" if m.historical
             else f"/series/{m.series_ticker}/markets/{m.ticker}/candlesticks")
@@ -219,12 +219,12 @@ def fetch_candles(m, since=None):
     return rows
 
 
-@app.function
+@app.function(hide_code=True)
 def load(path):
     return pd.read_parquet(path) if path.exists() else pd.DataFrame()
 
 
-@app.function
+@app.function(hide_code=True)
 def tidy_trades(df, markets):
     df = df.drop_duplicates("trade_id", keep="last")
     df = df.drop(columns=KEYS, errors="ignore") \
@@ -232,7 +232,7 @@ def tidy_trades(df, markets):
     return df.sort_values(["ticker", "created_time"]).reset_index(drop=True)
 
 
-@app.function
+@app.function(hide_code=True)
 def tidy_candles(df, markets):
     df = df.drop_duplicates(["ticker", "ts"], keep="last")
     df = df.drop(columns=KEYS, errors="ignore") \
@@ -240,7 +240,7 @@ def tidy_candles(df, markets):
     return df.sort_values(["ticker", "ts"]).reset_index(drop=True)
 
 
-@app.function
+@app.function(hide_code=True)
 def download(series, full=False):
     OUT.mkdir(exist_ok=True)
     markets = fetch_markets(series)
@@ -309,7 +309,7 @@ def download(series, full=False):
     print(f"settled contracts whose trades match reported volume (±1%): {ok.mean():.0%} of {len(chk)}")
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     args = mo.cli_args()
     series = mo.ui.text(value=args.get("series") or ",".join(SERIES),
@@ -320,7 +320,7 @@ def _():
     return full, go, series
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _(full, go, series):
     # In the editor, wait for the button; as a script, run straight away.
     mo.stop(mo.running_in_notebook() and not go.value,
@@ -329,7 +329,7 @@ def _(full, go, series):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def _():
     import pyarrow.parquet as pq
 
