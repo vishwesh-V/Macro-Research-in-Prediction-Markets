@@ -9,6 +9,7 @@ __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
 with app.setup(hide_code=True):
+    import math
     import re
     from pathlib import Path
 
@@ -164,6 +165,107 @@ def equal_trade_buckets(trades_by_day, n):
     assert cuts == sorted(set(cuts)), f"two cuts on the same day: {cuts}"
     edges = list(zip([1] + [c + 1 for c in cuts], cuts + [max(days)]))
     return {f"{lo}–{hi} days": (lo, hi) for lo, hi in edges}
+
+
+@app.function(hide_code=True)
+def fit_logit(X, y):
+    """Logistic regression by Newton-Raphson, started at the calibrated curve (0, 1, 0, ...). Returns
+    (coefficients, fitted probabilities, Hessian), or None when there is no finite solution (perfect separation)."""
+    b = np.zeros(X.shape[1])
+    b[1] = 1.0
+    for _ in range(100):
+        mu = 1 / (1 + np.exp(-(X @ b)))
+        H = X.T @ (X * (mu * (1 - mu))[:, None])
+        try:
+            step = np.linalg.solve(H, X.T @ (y - mu))
+        except np.linalg.LinAlgError:
+            return None
+        b = b + step
+        if not np.isfinite(b).all() or np.abs(b).max() > 50:
+            return None
+        if np.abs(step).max() < 1e-10:
+            return b, mu, H
+    return None
+
+
+@app.function(hide_code=True)
+def cluster_covariance(X, y, mu, H, g):
+    """Cluster-robust (CR1) covariance of logistic regression coefficients; g holds cluster codes 0..G-1."""
+    n_clusters = g.max() + 1
+    S = np.zeros((n_clusters, X.shape[1]))
+    np.add.at(S, g, X * (y - mu)[:, None])  # score per cluster
+    H_inv = np.linalg.inv(H)
+    return n_clusters / (n_clusters - 1) * H_inv @ S.T @ S @ H_inv
+
+
+@app.function(hide_code=True)
+def bootstrap_joint_p(boots, estimate, null):
+    """Share of bootstrap draws farther from the estimate than the null is, in the metric of the bootstrap
+    covariance: a joint test that does not rely on many clusters."""
+    V_inv = np.linalg.inv(np.atleast_2d(np.cov(boots.T)))
+    dist = np.einsum("ij,jk,ik->i", boots - estimate, V_inv, boots - estimate)
+    d = estimate - null
+    return (np.sum(dist >= d @ V_inv @ d) + 1) / (len(boots) + 1)
+
+
+@app.function(hide_code=True)
+def calibration_regression(y, f, clusters, n_boot=999, seed=0):
+    """Logistic calibration regression P(Y = 1 | f) = Λ(α + β·logit f), fitted by maximum likelihood.
+
+    Calibrated forecasts have α = 0 and β = 1. Tests use cluster-robust (CR1) standard errors. With few
+    clusters those are unreliable, so whole clusters are also resampled (pairs cluster bootstrap) for percentile
+    intervals and a joint test. A resample in which the outcome is perfectly separated has no finite estimate
+    and is skipped; `boot_ok` is the share kept.
+    """
+    X = np.column_stack([np.ones(len(f)), np.log(f / (1 - f))])
+    y = np.asarray(y, dtype=float)
+    g = pd.factorize(pd.Series(clusters))[0]
+    b, mu, H = fit_logit(X, y)
+    V = cluster_covariance(X, y, mu, H, g)
+    d = b - np.array([0.0, 1.0])
+    se = np.sqrt(np.diag(V))
+
+    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        rows = np.concatenate([rows_of[k] for k in rng.integers(0, len(rows_of), len(rows_of))])
+        r = fit_logit(X[rows], y[rows])
+        if r is not None:
+            boots.append(r[0])
+    boots = np.array(boots)
+    lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+    return dict(
+        forecasts=len(y), clusters=len(rows_of),
+        alpha=b[0], alpha_se=se[0], alpha_ci=f"[{lo[0]:.2f}, {hi[0]:.2f}]",
+        beta=b[1], beta_se=se[1], beta_ci=f"[{lo[1]:.2f}, {hi[1]:.2f}]",
+        p_alpha_0=math.erfc(abs(d[0] / se[0]) / math.sqrt(2)),
+        p_beta_1=math.erfc(abs(d[1] / se[1]) / math.sqrt(2)),
+        p_joint=math.exp(-(d @ np.linalg.solve(V, d)) / 2),  # chi-squared with 2 degrees of freedom
+        p_joint_boot=bootstrap_joint_p(boots, b, np.array([0.0, 1.0])),
+        boot_ok=len(boots) / n_boot,
+    )
+
+
+@app.function(hide_code=True)
+def calibration_curves_chart(results, field, domain, colors, legend_title, title):
+    """Fitted calibration curves Λ(α + β·logit p), one per row of `results`, against the 45° line."""
+    _p = np.linspace(0.01, 0.99, 99)
+    _curves = pd.concat([
+        pd.DataFrame({field: getattr(r, field), "p": _p,
+                      "fitted": 1 / (1 + np.exp(-(r.alpha + r.beta * np.log(_p / (1 - _p)))))})
+        for r in results.itertuples()
+    ])
+    _diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
+        x="p:Q", y="p:Q")
+    _lines = alt.Chart(_curves).mark_line(strokeWidth=2).encode(
+        x=alt.X("p:Q", title="Forecast", axis=alt.Axis(format="%")),
+        y=alt.Y("fitted:Q", title="Fitted P(YES)", axis=alt.Axis(format="%")),
+        color=alt.Color(f"{field}:N", scale=alt.Scale(domain=domain, range=colors), title=legend_title),
+        tooltip=[f"{field}:N", alt.Tooltip("p:Q", format=".2f", title="Forecast"),
+                 alt.Tooltip("fitted:Q", format=".3f", title="Fitted P(YES)")],
+    )
+    return (_diagonal + _lines).properties(width=380, height=380, title=title)
 
 
 @app.cell(hide_code=True)
@@ -548,6 +650,56 @@ def release_scores(forecasts, sample):
                    brier_median=("brier", "median"))
               .reset_index())
     mo.vstack([_chart, mo.ui.table(_table.round(4), selection=None, page_size=20)])
+    return
+
+
+@app.cell(hide_code=True)
+def regression_md():
+    mo.md(r"""
+    ## 5 · Calibration regression
+
+    A test of calibration without bins, as in section 6 of `02_calibration_kalshi.py`: the outcome is regressed on
+    the forecast in log odds,
+
+    $$\mathbb{P}(Y_i = 1 \mid f_i) = \Lambda\big(\alpha + \beta \operatorname{logit} f_i\big), \qquad \Lambda(z) = \frac{1}{1 + e^{-z}},$$
+
+    by maximum likelihood. Calibrated forecasts have $\alpha = 0$ and $\beta = 1$. $\beta > 1$ means the market is
+    **under-confident** (prices too close to 50%: contracts priced high settle YES more often than priced, and those
+    priced low less often); $\beta < 1$ means **over-confident**; $\alpha \ne 0$ means a 50% price settles YES more
+    ($\alpha > 0$) or less ($\alpha < 0$) often than half the time.
+
+    Each series is fitted on its own, for every horizon group, on the sample set in *Analysis choices*. Two pooled
+    rows follow: the CPI series together, and every series picked. **Standard errors are clustered by release
+    date**, not by event: headline, core and year-over-year CPI settle on the same morning's print, so a surprise
+    moves all three ladders at once and they are one observation, not three. Release dates are also resampled with
+    replacement (999 times) for the 95% intervals and a second joint test, `p_joint_boot`. The chart shows the fitted
+    curves for the horizon group chosen in section 2.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def regression(horizon, picked, sample):
+    _subsets = {SERIES[s]: sample[sample.series_ticker == s] for s in picked}
+    _cpi = [s for s in picked if s != "KXPAYROLLS"]
+    if len(_cpi) > 1:
+        _subsets["CPI (pooled)"] = sample[sample.series_ticker.isin(_cpi)]
+    if len(picked) > 1:
+        _subsets["All picked"] = sample
+    _rows = []
+    for _name, _d in _subsets.items():
+        for _group, _hs in HORIZON_GROUPS.items():
+            _x = _d[_d.ttm.isin(_hs)]
+            _rows.append({"series": _name, "horizon": _group,
+                          **calibration_regression(_x.y, _x.f.to_numpy(), _x.release_date)})
+    calibration_fit = pd.DataFrame(_rows)
+    _domain = [*SERIES.values(), "CPI (pooled)", "All picked"]
+    mo.vstack([
+        calibration_curves_chart(calibration_fit[calibration_fit.horizon == horizon.selected_key], "series", _domain,
+                                 [*SERIES_COLORS, "#52514e", "#9a9994"], "Series",
+                                 f"Fitted calibration curves · {horizon.selected_key}"),
+        mo.ui.table(calibration_fit.round(3), selection=None, page_size=20),
+    ])
     return
 
 

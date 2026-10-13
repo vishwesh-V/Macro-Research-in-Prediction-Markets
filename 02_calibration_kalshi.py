@@ -9,6 +9,7 @@ __generated_with = "0.25.1"
 app = marimo.App(width="medium")
 
 with app.setup(hide_code=True):
+    import math
     import re
     from pathlib import Path
 
@@ -35,6 +36,10 @@ with app.setup(hide_code=True):
     SNAPSHOT_HOUR_ET = 16
     STALE_DAYS = 7  # a quote unchanged for longer than this is stale (robustness check)
     MINUTE_WINDOW_DAYS = 60  # minute-level reliability: days before the meeting
+    # Kalshi's liquidity break: the first meeting after it (May 2025) traded about 15 times the contracts of the
+    # one before (March 2025), and volume stayed there. Regimes are split by meeting date.
+    LIQUIDITY_BREAK = pd.Timestamp("2025-05-01")
+    REGIMES = ["Before May 2025", "From May 2025"]
 
 
 @app.function(hide_code=True)
@@ -178,6 +183,149 @@ def reliability_chart(table, size, size_title, title):
     return (diagonal + points).properties(width=380, height=380, title=title)
 
 
+@app.function(hide_code=True)
+def fit_logit(X, y):
+    """Logistic regression by Newton-Raphson, started at the calibrated curve (0, 1, 0, ...). Returns
+    (coefficients, fitted probabilities, Hessian), or None when there is no finite solution (perfect separation)."""
+    b = np.zeros(X.shape[1])
+    b[1] = 1.0
+    for _ in range(100):
+        mu = 1 / (1 + np.exp(-(X @ b)))
+        H = X.T @ (X * (mu * (1 - mu))[:, None])
+        try:
+            step = np.linalg.solve(H, X.T @ (y - mu))
+        except np.linalg.LinAlgError:
+            return None
+        b = b + step
+        if not np.isfinite(b).all() or np.abs(b).max() > 50:
+            return None
+        if np.abs(step).max() < 1e-10:
+            return b, mu, H
+    return None
+
+
+@app.function(hide_code=True)
+def cluster_covariance(X, y, mu, H, g):
+    """Cluster-robust (CR1) covariance of logistic regression coefficients; g holds cluster codes 0..G-1."""
+    n_clusters = g.max() + 1
+    S = np.zeros((n_clusters, X.shape[1]))
+    np.add.at(S, g, X * (y - mu)[:, None])  # score per cluster
+    H_inv = np.linalg.inv(H)
+    return n_clusters / (n_clusters - 1) * H_inv @ S.T @ S @ H_inv
+
+
+@app.function(hide_code=True)
+def bootstrap_joint_p(boots, estimate, null):
+    """Share of bootstrap draws farther from the estimate than the null is, in the metric of the bootstrap
+    covariance: a joint test that does not rely on many clusters."""
+    V_inv = np.linalg.inv(np.atleast_2d(np.cov(boots.T)))
+    dist = np.einsum("ij,jk,ik->i", boots - estimate, V_inv, boots - estimate)
+    d = estimate - null
+    return (np.sum(dist >= d @ V_inv @ d) + 1) / (len(boots) + 1)
+
+
+@app.function(hide_code=True)
+def calibration_regression(y, f, clusters, n_boot=999, seed=0):
+    """Logistic calibration regression P(Y = 1 | f) = Λ(α + β·logit f), fitted by maximum likelihood.
+
+    Calibrated forecasts have α = 0 and β = 1. Tests use cluster-robust (CR1) standard errors. With few
+    clusters those are unreliable, so whole clusters are also resampled (pairs cluster bootstrap) for percentile
+    intervals and a joint test. A resample in which the outcome is perfectly separated has no finite estimate
+    and is skipped; `boot_ok` is the share kept.
+    """
+    X = np.column_stack([np.ones(len(f)), np.log(f / (1 - f))])
+    y = np.asarray(y, dtype=float)
+    g = pd.factorize(pd.Series(clusters))[0]
+    b, mu, H = fit_logit(X, y)
+    V = cluster_covariance(X, y, mu, H, g)
+    d = b - np.array([0.0, 1.0])
+    se = np.sqrt(np.diag(V))
+
+    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        rows = np.concatenate([rows_of[k] for k in rng.integers(0, len(rows_of), len(rows_of))])
+        r = fit_logit(X[rows], y[rows])
+        if r is not None:
+            boots.append(r[0])
+    boots = np.array(boots)
+    lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+    return dict(
+        forecasts=len(y), clusters=len(rows_of),
+        alpha=b[0], alpha_se=se[0], alpha_ci=f"[{lo[0]:.2f}, {hi[0]:.2f}]",
+        beta=b[1], beta_se=se[1], beta_ci=f"[{lo[1]:.2f}, {hi[1]:.2f}]",
+        p_alpha_0=math.erfc(abs(d[0] / se[0]) / math.sqrt(2)),
+        p_beta_1=math.erfc(abs(d[1] / se[1]) / math.sqrt(2)),
+        p_joint=math.exp(-(d @ np.linalg.solve(V, d)) / 2),  # chi-squared with 2 degrees of freedom
+        p_joint_boot=bootstrap_joint_p(boots, b, np.array([0.0, 1.0])),
+        boot_ok=len(boots) / n_boot,
+    )
+
+
+@app.function(hide_code=True)
+def regime_difference(y, f, clusters, after, n_boot=999, seed=0):
+    """Does the calibration curve change at a break? Fits
+    P(Y = 1 | f) = Λ(α + β·logit f + Δα·D + Δβ·D·logit f), with D = 1 after the break, so Δα and Δβ are the
+    changes in intercept and slope; Δα = Δβ = 0 means one curve fits both regimes. Every cluster must lie in one
+    regime. Tests as in `calibration_regression`; the bootstrap resamples clusters within each regime, so each
+    keeps its number of clusters.
+    """
+    logit = np.log(f / (1 - f))
+    D = np.asarray(after, dtype=float)
+    X = np.column_stack([np.ones(len(f)), logit, D, D * logit])
+    y = np.asarray(y, dtype=float)
+    g = pd.factorize(pd.Series(clusters))[0]
+    assert (pd.Series(D).groupby(g).nunique() == 1).all(), "a cluster spans both regimes"
+    b, mu, H = fit_logit(X, y)
+    V = cluster_covariance(X, y, mu, H, g)
+    d, V_d = b[2:], V[2:, 2:]
+    se = np.sqrt(np.diag(V_d))
+
+    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    strata = [[k for k in range(len(rows_of)) if D[rows_of[k][0]] == v] for v in (0.0, 1.0)]
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        picks = [k for s in strata for k in rng.choice(s, len(s))]
+        rows = np.concatenate([rows_of[k] for k in picks])
+        r = fit_logit(X[rows], y[rows])
+        if r is not None:
+            boots.append(r[0][2:])
+    boots = np.array(boots)
+    lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+    return dict(
+        delta_alpha=d[0], delta_alpha_ci=f"[{lo[0]:.2f}, {hi[0]:.2f}]",
+        delta_beta=d[1], delta_beta_ci=f"[{lo[1]:.2f}, {hi[1]:.2f}]",
+        p_delta_alpha=math.erfc(abs(d[0] / se[0]) / math.sqrt(2)),
+        p_delta_beta=math.erfc(abs(d[1] / se[1]) / math.sqrt(2)),
+        p_joint=math.exp(-(d @ np.linalg.solve(V_d, d)) / 2),  # chi-squared with 2 degrees of freedom
+        p_joint_boot=bootstrap_joint_p(boots, d, np.zeros(2)),
+        boot_ok=len(boots) / n_boot,
+    )
+
+
+@app.function(hide_code=True)
+def calibration_curves_chart(results, field, domain, colors, legend_title, title):
+    """Fitted calibration curves Λ(α + β·logit p), one per row of `results`, against the 45° line."""
+    _p = np.linspace(0.01, 0.99, 99)
+    _curves = pd.concat([
+        pd.DataFrame({field: getattr(r, field), "p": _p,
+                      "fitted": 1 / (1 + np.exp(-(r.alpha + r.beta * np.log(_p / (1 - _p)))))})
+        for r in results.itertuples()
+    ])
+    _diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
+        x="p:Q", y="p:Q")
+    _lines = alt.Chart(_curves).mark_line(strokeWidth=2).encode(
+        x=alt.X("p:Q", title="Forecast", axis=alt.Axis(format="%")),
+        y=alt.Y("fitted:Q", title="Fitted P(YES)", axis=alt.Axis(format="%")),
+        color=alt.Color(f"{field}:N", scale=alt.Scale(domain=domain, range=colors), title=legend_title),
+        tooltip=[f"{field}:N", alt.Tooltip("p:Q", format=".2f", title="Forecast"),
+                 alt.Tooltip("fitted:Q", format=".3f", title="Fitted P(YES)")],
+    )
+    return (_diagonal + _lines).properties(width=380, height=380, title=title)
+
+
 @app.cell(hide_code=True)
 def intro():
     mo.md(r"""
@@ -280,9 +428,9 @@ def choices_md():
     mo.md(r"""
     ## Analysis choices
 
-    These settings apply to sections 2–5. The defaults are the main specification; the others are the
-    robustness checks. The tick-floor setting applies to the contract-level sections (2–4) only: section 5 scores
-    each meeting's full distribution, so it always keeps every bucket.
+    These settings apply to sections 2–7. The defaults are the main specification; the others are the
+    robustness checks. The tick-floor setting applies to the contract-level sections (2–4, 6 and 7) only: section 5
+    scores each meeting's full distribution, so it always keeps every bucket.
     """)
     return
 
@@ -695,6 +843,107 @@ def meeting_scores(forecasts, price):
                     "By horizon": mo.ui.table(_by_ttm.round(3), selection=None)}),
     ])
     return (meeting_scores,)
+
+
+@app.cell(hide_code=True)
+def regression_md():
+    mo.md(r"""
+    ## 6 · Calibration regression
+
+    A test of calibration without bins. For each horizon group, the outcome is regressed on the forecast in log
+    odds,
+
+    $$\mathbb{P}(Y_i = 1 \mid f_i) = \Lambda\big(\alpha + \beta \operatorname{logit} f_i\big), \qquad \Lambda(z) = \frac{1}{1 + e^{-z}},$$
+
+    by maximum likelihood. Calibrated forecasts have $\alpha = 0$ and $\beta = 1$, and the regression then returns
+    the forecast itself.
+
+    - $\beta > 1$: the market is **under-confident**. Prices are too close to 50%: favorites win more often than
+      priced and longshots less often (the favorite-longshot pattern of section 2).
+    - $\beta < 1$: **over-confident**: prices are too far from 50%.
+    - $\alpha \ne 0$: at a 50% price, YES happens more ($\alpha > 0$) or less ($\alpha < 0$) often than half the time.
+
+    The sample is the one set in *Analysis choices*. Forecasts of one meeting share its outcome and each contract
+    appears once per snapshot day, so standard errors are clustered by meeting. With 18 to 28 meetings the clustered
+    tests can be too optimistic, so meetings are also resampled with replacement (999 times) for the 95% intervals
+    and a second joint test, `p_joint_boot`. Where the two joint tests disagree, the bootstrap is the safer one.
+    `boot_ok` is the share of resamples with a finite estimate: one in which some forecast level perfectly
+    separates YES from NO has none and is skipped, which pulls the interval for $\beta$ down. Read rows with
+    `boot_ok` well below 1 (the 45–60 day group) with care.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def regression(sample):
+    _rows = []
+    for _name, _hs in HORIZON_GROUPS.items():
+        _x = sample[sample.ttm.isin(_hs)]
+        _rows.append({"horizon": _name, **calibration_regression(_x.y, _x.f.to_numpy(), _x.event_ticker)})
+    calibration_fit = pd.DataFrame(_rows)
+    mo.vstack([
+        calibration_curves_chart(calibration_fit, "horizon", list(HORIZON_GROUPS), TTM_COLORS[::2], "Days to meeting",
+                                 "Fitted calibration curves"),
+        mo.ui.table(calibration_fit.round(3), selection=None),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def regime_md():
+    mo.md(r"""
+    ## 7 · Before and after the liquidity break
+
+    Kalshi's Fed markets changed size in spring 2025: the May 2025 meeting traded about 41 million contracts against
+    2.8 million for March 2025, and every meeting since has traded 20 to 100 million. The calibration regression of
+    section 6 is fitted separately on the meetings before May 2025 (16 meetings, May 2023 to March 2025) and from May
+    2025 (12 meetings), in each horizon group.
+
+    **The test.** One regression on both regimes,
+
+    $$\mathbb{P}(Y_i = 1 \mid f_i) = \Lambda\big(\alpha + \beta \operatorname{logit} f_i + \Delta\alpha\, D_i + \Delta\beta\, D_i \operatorname{logit} f_i\big),$$
+
+    with $D_i = 1$ for meetings from May 2025. $\Delta\beta$ is the change in slope and $\Delta\alpha$ the change in
+    intercept; $\Delta\alpha = \Delta\beta = 0$ means one calibration curve fits both regimes (`p_joint`). Standard
+    errors are clustered by meeting, and the bootstrap resamples meetings within each regime.
+
+    **Liquidity is not the only difference.** The two regimes are also different stretches of monetary policy: mostly
+    holds before May 2025, a cutting cycle after. A change here is consistent with liquidity, not proof of it. The
+    fed funds futures, whose liquidity did not change, are the control: `03_fedfunds_vs_kalshi.py` runs the same
+    split on both sources.
+
+    With 12 to 16 meetings per regime the tests have little power: a large p-value means no detectable change, not no
+    change. The 45–60 day group has almost no meetings before May 2025 (they were listed only weeks ahead).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def regime(sample):
+    _regime = np.where(sample.meeting_date >= LIQUIDITY_BREAK, REGIMES[1], REGIMES[0])
+    _fits, _diffs = [], []
+    for _name, _hs in HORIZON_GROUPS.items():
+        _in = sample.ttm.isin(_hs).to_numpy()
+        for _r in REGIMES:
+            _x = sample[_in & (_regime == _r)]
+            if _x.event_ticker.nunique() >= 5:
+                _fits.append({"horizon": _name, "regime": _r,
+                              **calibration_regression(_x.y, _x.f.to_numpy(), _x.event_ticker)})
+        _x = sample[_in]
+        if (pd.Series(_regime[_in]).groupby(_x.event_ticker.to_numpy()).first().value_counts() >= 5).sum() == 2:
+            _diffs.append({"horizon": _name, **regime_difference(_x.y, _x.f.to_numpy(), _x.event_ticker,
+                                                                  _regime[_in] == REGIMES[1])})
+    regime_fit = pd.DataFrame(_fits)
+    regime_diff = pd.DataFrame(_diffs)
+    mo.vstack([
+        calibration_curves_chart(regime_fit[regime_fit.horizon == "1–21 days (main)"], "regime", REGIMES,
+                                 ["#86b6ef", "#104281"], "Meetings", "Fitted calibration curves by regime · 1–21 days"),
+        mo.md("**Calibration in each regime** (groups with fewer than 5 meetings in a regime are left out)"),
+        mo.ui.table(regime_fit.round(3), selection=None),
+        mo.md("**Change from before to after May 2025**"),
+        mo.ui.table(regime_diff.round(3), selection=None),
+    ])
+    return
 
 
 if __name__ == "__main__":

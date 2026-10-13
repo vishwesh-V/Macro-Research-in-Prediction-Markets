@@ -13,6 +13,7 @@ app = marimo.App(width="medium")
 
 with app.setup(hide_code=True):
     import calendar
+    import math
     import re
     from pathlib import Path
 
@@ -32,6 +33,10 @@ with app.setup(hide_code=True):
     TTMS = [1, 2, 3, 5, 7, 10, 14, 21, 30, 45, 60]  # days to meeting, as in 02_calibration_kalshi.py
     SNAPSHOT_HOUR_ET = 15  # futures settle around 15:00 ET, so Kalshi is read at the same time
     P_FLOOR = 0.005  # scores clip both sources to [0.5¢, 99.5¢], the floor Kalshi's mid already has
+    # Kalshi's liquidity break: the first meeting after it (May 2025) traded about 15 times the contracts of the
+    # one before (March 2025), and volume stayed there. Regimes are split by meeting date.
+    LIQUIDITY_BREAK = pd.Timestamp("2025-05-01")
+    REGIMES = ["Before May 2025", "From May 2025"]
 
     # Same encoding as 01_eda_kalshi.py: cuts blue, hikes red, hold gray; darker toward the extremes.
     MOVE_COLORS = {"Cut >25": "#1d5fb0", "Cut 25": "#6aa3e8", "Hold": "#9a9994", "Hike 25": "#ee8a88",
@@ -149,6 +154,149 @@ def move_scale(moves):
     """Color scale limited to the outcomes present, in cut-to-hike order."""
     present = [m for m in MOVES if m in set(moves)]
     return alt.Scale(domain=present, range=[MOVE_COLORS[m] for m in present])
+
+
+@app.function(hide_code=True)
+def fit_logit(X, y):
+    """Logistic regression by Newton-Raphson, started at the calibrated curve (0, 1, 0, ...). Returns
+    (coefficients, fitted probabilities, Hessian), or None when there is no finite solution (perfect separation)."""
+    b = np.zeros(X.shape[1])
+    b[1] = 1.0
+    for _ in range(100):
+        mu = 1 / (1 + np.exp(-(X @ b)))
+        H = X.T @ (X * (mu * (1 - mu))[:, None])
+        try:
+            step = np.linalg.solve(H, X.T @ (y - mu))
+        except np.linalg.LinAlgError:
+            return None
+        b = b + step
+        if not np.isfinite(b).all() or np.abs(b).max() > 50:
+            return None
+        if np.abs(step).max() < 1e-10:
+            return b, mu, H
+    return None
+
+
+@app.function(hide_code=True)
+def cluster_covariance(X, y, mu, H, g):
+    """Cluster-robust (CR1) covariance of logistic regression coefficients; g holds cluster codes 0..G-1."""
+    n_clusters = g.max() + 1
+    S = np.zeros((n_clusters, X.shape[1]))
+    np.add.at(S, g, X * (y - mu)[:, None])  # score per cluster
+    H_inv = np.linalg.inv(H)
+    return n_clusters / (n_clusters - 1) * H_inv @ S.T @ S @ H_inv
+
+
+@app.function(hide_code=True)
+def bootstrap_joint_p(boots, estimate, null):
+    """Share of bootstrap draws farther from the estimate than the null is, in the metric of the bootstrap
+    covariance: a joint test that does not rely on many clusters."""
+    V_inv = np.linalg.inv(np.atleast_2d(np.cov(boots.T)))
+    dist = np.einsum("ij,jk,ik->i", boots - estimate, V_inv, boots - estimate)
+    d = estimate - null
+    return (np.sum(dist >= d @ V_inv @ d) + 1) / (len(boots) + 1)
+
+
+@app.function(hide_code=True)
+def calibration_regression(y, f, clusters, n_boot=999, seed=0):
+    """Logistic calibration regression P(Y = 1 | f) = Λ(α + β·logit f), fitted by maximum likelihood.
+
+    Calibrated forecasts have α = 0 and β = 1. Tests use cluster-robust (CR1) standard errors. With few
+    clusters those are unreliable, so whole clusters are also resampled (pairs cluster bootstrap) for percentile
+    intervals and a joint test. A resample in which the outcome is perfectly separated has no finite estimate
+    and is skipped; `boot_ok` is the share kept.
+    """
+    X = np.column_stack([np.ones(len(f)), np.log(f / (1 - f))])
+    y = np.asarray(y, dtype=float)
+    g = pd.factorize(pd.Series(clusters))[0]
+    b, mu, H = fit_logit(X, y)
+    V = cluster_covariance(X, y, mu, H, g)
+    d = b - np.array([0.0, 1.0])
+    se = np.sqrt(np.diag(V))
+
+    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        rows = np.concatenate([rows_of[k] for k in rng.integers(0, len(rows_of), len(rows_of))])
+        r = fit_logit(X[rows], y[rows])
+        if r is not None:
+            boots.append(r[0])
+    boots = np.array(boots)
+    lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+    return dict(
+        forecasts=len(y), clusters=len(rows_of),
+        alpha=b[0], alpha_se=se[0], alpha_ci=f"[{lo[0]:.2f}, {hi[0]:.2f}]",
+        beta=b[1], beta_se=se[1], beta_ci=f"[{lo[1]:.2f}, {hi[1]:.2f}]",
+        p_alpha_0=math.erfc(abs(d[0] / se[0]) / math.sqrt(2)),
+        p_beta_1=math.erfc(abs(d[1] / se[1]) / math.sqrt(2)),
+        p_joint=math.exp(-(d @ np.linalg.solve(V, d)) / 2),  # chi-squared with 2 degrees of freedom
+        p_joint_boot=bootstrap_joint_p(boots, b, np.array([0.0, 1.0])),
+        boot_ok=len(boots) / n_boot,
+    )
+
+
+@app.function(hide_code=True)
+def regime_difference(y, f, clusters, after, n_boot=999, seed=0):
+    """Does the calibration curve change at a break? Fits
+    P(Y = 1 | f) = Λ(α + β·logit f + Δα·D + Δβ·D·logit f), with D = 1 after the break, so Δα and Δβ are the
+    changes in intercept and slope; Δα = Δβ = 0 means one curve fits both regimes. Every cluster must lie in one
+    regime. Tests as in `calibration_regression`; the bootstrap resamples clusters within each regime, so each
+    keeps its number of clusters.
+    """
+    logit = np.log(f / (1 - f))
+    D = np.asarray(after, dtype=float)
+    X = np.column_stack([np.ones(len(f)), logit, D, D * logit])
+    y = np.asarray(y, dtype=float)
+    g = pd.factorize(pd.Series(clusters))[0]
+    assert (pd.Series(D).groupby(g).nunique() == 1).all(), "a cluster spans both regimes"
+    b, mu, H = fit_logit(X, y)
+    V = cluster_covariance(X, y, mu, H, g)
+    d, V_d = b[2:], V[2:, 2:]
+    se = np.sqrt(np.diag(V_d))
+
+    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    strata = [[k for k in range(len(rows_of)) if D[rows_of[k][0]] == v] for v in (0.0, 1.0)]
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        picks = [k for s in strata for k in rng.choice(s, len(s))]
+        rows = np.concatenate([rows_of[k] for k in picks])
+        r = fit_logit(X[rows], y[rows])
+        if r is not None:
+            boots.append(r[0][2:])
+    boots = np.array(boots)
+    lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+    return dict(
+        delta_alpha=d[0], delta_alpha_ci=f"[{lo[0]:.2f}, {hi[0]:.2f}]",
+        delta_beta=d[1], delta_beta_ci=f"[{lo[1]:.2f}, {hi[1]:.2f}]",
+        p_delta_alpha=math.erfc(abs(d[0] / se[0]) / math.sqrt(2)),
+        p_delta_beta=math.erfc(abs(d[1] / se[1]) / math.sqrt(2)),
+        p_joint=math.exp(-(d @ np.linalg.solve(V_d, d)) / 2),  # chi-squared with 2 degrees of freedom
+        p_joint_boot=bootstrap_joint_p(boots, d, np.zeros(2)),
+        boot_ok=len(boots) / n_boot,
+    )
+
+
+@app.function(hide_code=True)
+def calibration_curves_chart(results, field, domain, colors, legend_title, title):
+    """Fitted calibration curves Λ(α + β·logit p), one per row of `results`, against the 45° line."""
+    _p = np.linspace(0.01, 0.99, 99)
+    _curves = pd.concat([
+        pd.DataFrame({field: getattr(r, field), "p": _p,
+                      "fitted": 1 / (1 + np.exp(-(r.alpha + r.beta * np.log(_p / (1 - _p)))))})
+        for r in results.itertuples()
+    ])
+    _diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
+        x="p:Q", y="p:Q")
+    _lines = alt.Chart(_curves).mark_line(strokeWidth=2).encode(
+        x=alt.X("p:Q", title="Forecast", axis=alt.Axis(format="%")),
+        y=alt.Y("fitted:Q", title="Fitted P(YES)", axis=alt.Axis(format="%")),
+        color=alt.Color(f"{field}:N", scale=alt.Scale(domain=domain, range=colors), title=legend_title),
+        tooltip=[f"{field}:N", alt.Tooltip("p:Q", format=".2f", title="Forecast"),
+                 alt.Tooltip("fitted:Q", format=".3f", title="Fitted P(YES)")],
+    )
+    return (_diagonal + _lines).properties(width=380, height=380, title=title)
 
 
 @app.cell(hide_code=True)
@@ -544,6 +692,82 @@ def reliability(scores_long):
         (_diagonal + _points).properties(width=380, height=380, title="Reliability · 1–30 days, pooled"),
         mo.ui.table(_rel.round(4), selection=None),
     ], widths=[1, 1])
+    return
+
+
+@app.cell(hide_code=True)
+def regression_md():
+    mo.md(r"""
+    ### Calibration regression, both sources on the same forecasts
+
+    The test of section 6 of `02_calibration_kalshi.py`, run on each source: the outcome is regressed on the forecast
+    in log odds, $\mathbb{P}(Y = 1 \mid p) = \Lambda(\alpha + \beta \operatorname{logit} p)$, and calibrated forecasts
+    have $\alpha = 0$ and $\beta = 1$ ($\beta > 1$: under-confident, prices too close to 50%; $\beta < 1$:
+    over-confident). The rows are the scored forecasts above, for the buckets picked there, after the clip to
+    $[0.005, 0.995]$, grouped into the horizon groups of notebook 02. Standard errors are clustered by meeting, and
+    meetings are resampled (999 times) for the 95% intervals and `p_joint_boot`.
+
+    Futures forecasts clipped from exactly 0 or 1 sit at the clip with the outcome they predicted, so they barely move
+    the fit; dropping them leaves the estimates unchanged. The Kalshi price here is the raw mid at 15:00 ET, not
+    notebook 02's normalized $q$ at 16:00, so its estimates differ somewhat from 02's.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def regression(scores_long):
+    _groups = {"1–21 days (main)": [h for h in TTMS if h <= 21], "30 days": [30], "45–60 days": [45, 60]}
+    _rows = []
+    for _source in ["Kalshi", "Futures"]:
+        for _group, _hs in _groups.items():
+            _x = scores_long[(scores_long.source == _source) & scores_long.ttm.isin(_hs)]
+            _rows.append({"source": _source, "horizon": _group,
+                          **calibration_regression(_x.y, _x.p.to_numpy(), _x.event_ticker)})
+    calibration_fit = pd.DataFrame(_rows)
+    mo.vstack([
+        calibration_curves_chart(calibration_fit[calibration_fit.horizon == "1–21 days (main)"], "source",
+                                 ["Kalshi", "Futures"], ["#2a78d6", "#eb6834"], "Source",
+                                 "Fitted calibration curves · 1–21 days"),
+        mo.ui.table(calibration_fit.round(3), selection=None),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def regime_md():
+    mo.md(r"""
+    ### Before and after Kalshi's liquidity break, both sources
+
+    Section 7 of `02_calibration_kalshi.py` finds how Kalshi's calibration changed when its volume jumped about 15-fold
+    in May 2025. The two regimes are also different policy periods (mostly holds, then a cutting cycle), so a change
+    there could come from the meetings rather than from liquidity. The futures, whose liquidity did not change, are
+    the control: fitted on the same forecasts, a change in Kalshi's curve that the futures do not share points to
+    Kalshi's market; a change both share points to the meetings. 1–21 days, the buckets picked above; standard errors
+    clustered by meeting, bootstrap within each regime. 16 meetings before, 12 from May 2025.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def regime(scores_long):
+    _s = scores_long[scores_long.ttm <= 21]
+    _regime = np.where(_s.meeting_date >= LIQUIDITY_BREAK, REGIMES[1], REGIMES[0])
+    _fits, _diffs = [], []
+    for _source in ["Kalshi", "Futures"]:
+        _src = (_s.source == _source).to_numpy()
+        for _r in REGIMES:
+            _x = _s[_src & (_regime == _r)]
+            _fits.append({"source": _source, "regime": _r,
+                          **calibration_regression(_x.y, _x.p.to_numpy(), _x.event_ticker)})
+        _x = _s[_src]
+        _diffs.append({"source": _source, **regime_difference(_x.y, _x.p.to_numpy(), _x.event_ticker,
+                                                              _regime[_src] == REGIMES[1])})
+    mo.vstack([
+        mo.md("**Calibration in each regime**"),
+        mo.ui.table(pd.DataFrame(_fits).round(3), selection=None),
+        mo.md("**Change from before to after May 2025**"),
+        mo.ui.table(pd.DataFrame(_diffs).round(3), selection=None),
+    ])
     return
 
 
