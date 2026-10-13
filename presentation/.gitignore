@@ -1,0 +1,8 @@
+main.log
+*.aux
+*.nav
+*.out
+*.snm
+*.toc
+*.xdv
+*.zip

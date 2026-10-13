@@ -1,0 +1,129 @@
+% MIT Sloan-style Beamer theme for the Kalshi macro project.
+% Colors follow the MIT/Sloan palette (MIT red #A31F34, grays). Edit them here only.
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{beamerthemesloan}
+
+\RequirePackage{tikz}
+\RequirePackage{pgfplots}
+\RequirePackage{booktabs}
+\RequirePackage{array}
+\RequirePackage[scaled=0.95]{helvet}
+\RequirePackage[T1]{fontenc}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta, positioning, calc}
+\usepgfplotslibrary{groupplots}
+
+% ---- Colors -------------------------------------------------------------
+\definecolor{sloanred}{HTML}{A31F34}   % MIT red: Kalshi, "ours", current section
+\definecolor{ink}{HTML}{1E1E1E}        % body text
+\definecolor{sloangray}{HTML}{8A8B8C}  % secondary text, inactive sections
+\definecolor{bench}{HTML}{4D5359}      % benchmark series: fed funds futures, DKW
+\definecolor{rule}{HTML}{DADBDC}       % hairlines, grids
+\definecolor{wash}{HTML}{F4EDEE}       % light red fill
+
+\renewcommand{\familydefault}{\sfdefault}
+\setbeamertemplate{navigation symbols}{}
+\setbeamercolor{normal text}{fg=ink, bg=white}
+\setbeamercolor{structure}{fg=sloanred}
+\setbeamercolor{alerted text}{fg=sloanred}
+\setbeamercolor{itemize item}{fg=sloanred}
+\setbeamertemplate{itemize item}{\raisebox{0.15em}{\rule{0.32em}{0.32em}}}
+\setbeamertemplate{itemize subitem}{--}
+\setbeamerfont{frametitle}{size=\Large, series=\bfseries}
+\setbeamerfont{framesubtitle}{size=\small, series=\mdseries}
+\setlength{\leftmargini}{1.1em}
+
+% ---- Appendix flag (changes the header label and footer numbering) --------
+\newif\ifsloanappendix
+\newcommand{\sloanappendix}{\appendix\global\sloanappendixtrue}
+
+% ---- Header: section navigation, current section in red -------------------
+\setbeamertemplate{section in head/foot}{%
+  \hbox{\color{sloanred}\bfseries\insertsectionhead}\hskip1.6em}
+\setbeamertemplate{section in head/foot shaded}{%
+  \hbox{\color{sloangray}\insertsectionhead}\hskip1.6em}
+\setbeamertemplate{headline}{%
+  \vskip7pt
+  \hbox to \paperwidth{\hskip0.55cm\usebeamerfont{section in head/foot}\scriptsize
+    \ifsloanappendix{\color{sloanred}\bfseries Appendix}\hskip0.9em{\color{rule}\textbar}\hskip0.9em\fi
+    \insertsectionnavigationhorizontal{0.85\paperwidth}{}{\hfill}\hfill}
+  \vskip4pt
+  {\color{rule}\hbox to \paperwidth{\hskip0.55cm\leaders\hrule height0.3pt\hfill\hskip0.55cm}}
+}
+
+% ---- Frame title: one takeaway sentence, optional subtitle ----------------
+\setbeamertemplate{frametitle}{%
+  \vskip2pt
+  {\usebeamerfont{frametitle}\color{ink}\insertframetitle\par}
+  \ifx\insertframesubtitle\@empty\else
+    \vskip1pt{\usebeamerfont{framesubtitle}\color{sloangray}\insertframesubtitle\par}
+  \fi}
+
+% ---- Footer: source, slide count, progress bar ----------------------------
+\newcommand{\sloansource}{}
+\newcommand{\source}[1]{\gdef\sloansource{#1}}  % use inside a frame: notebook the slide comes from
+\setbeamertemplate{footline}{%
+  \hbox to \paperwidth{\hskip0.55cm\tiny\color{sloangray}%
+    MIT Sloan \,\textbar\, 15.S06\ifx\sloansource\@empty\else\,\textbar\, \sloansource\fi\hfill
+    \ifsloanappendix A\insertframenumber\else\insertframenumber\,/\,\inserttotalframenumber\fi
+    \hskip0.55cm}
+  \vskip4pt
+  \ifsloanappendix\vskip1.2pt\else
+  \begin{tikzpicture}
+    \fill[rule] (0,0) rectangle (\paperwidth,1.2pt);
+    \pgfmathsetmacro{\sloanprogress}{min(\insertframenumber/max(\inserttotalframenumber,1),1)}
+    \fill[sloanred] (0,0) rectangle (\sloanprogress\paperwidth,1.2pt);
+  \end{tikzpicture}\fi
+  \global\let\sloansource\@empty
+}
+
+% ---- Title page -----------------------------------------------------------
+\setbeamertemplate{title page}{%
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[sloanred] (current page.north west) rectangle ([xshift=0.34\paperwidth]current page.south west);
+    \node[anchor=south west, text=white, font=\footnotesize\bfseries, align=left,
+        text width=0.34\paperwidth-1.1cm]
+      at ([xshift=0.55cm, yshift=0.6cm]current page.south west)
+      {MIT Sloan School\\of Management\\[2pt]\mdseries 15.S06 AI and ML\\Research in Finance};
+    \node[anchor=north west, text width=0.56\paperwidth, align=left]
+      at ([xshift=0.39\paperwidth, yshift=-2.1cm]current page.north west) {%
+      {\color{sloanred}\scriptsize\bfseries\MakeUppercase{\insertsubtitle}}\\[8pt]
+      {\color{ink}\LARGE\bfseries\inserttitle}\\[14pt]
+      {\color{ink}\small\insertauthor}\\[4pt]
+      {\color{sloangray}\footnotesize\insertdate}};
+  \end{tikzpicture}}
+
+% Full-bleed red divider (used for the appendix)
+\newcommand{\dividerframe}[1]{%
+  {\setbeamertemplate{headline}{}\setbeamertemplate{footline}{}%
+   \begin{frame}[noframenumbering]
+     \begin{tikzpicture}[remember picture, overlay]
+       \fill[sloanred] (current page.north west) rectangle (current page.south east);
+       \node[text=white, font=\Huge\bfseries, anchor=west] at ([xshift=1.2cm]current page.west) {#1};
+     \end{tikzpicture}
+   \end{frame}}}
+
+% ---- Chart style ------------------------------------------------------------
+\pgfplotsset{
+  sloan/.style={
+    axis lines*=left, axis line style={sloangray, line width=0.4pt},
+    tick style={sloangray}, major tick length=2pt,
+    tick label style={font=\scriptsize, color=sloangray},
+    label style={font=\footnotesize, color=ink},
+    ymajorgrids, major grid style={rule, line width=0.3pt},
+    legend style={draw=none, fill=none, font=\scriptsize, text=ink},
+    legend cell align=left,
+    every axis plot/.append style={line width=1.2pt},
+    scaled ticks=false,
+  },
+  sloanbars/.style={legend image code/.code={\fill[#1] (0cm,-0.07cm) rectangle (0.2cm,0.11cm);}, every axis plot/.append style={line width=0pt},
+  },
+  kalshiline/.style={sloanred, line width=1.4pt},
+  benchline/.style={bench, line width=1.2pt, densely dashed},
+}
+% Small annotation text inside charts
+\tikzset{note/.style={font=\scriptsize, text=ink, align=left}}
+
+% Key number in a sidebar
+\newcommand{\keyfig}[2]{%
+  {\color{sloanred}\Large\bfseries #1}\\[-1pt]{\footnotesize\color{ink}#2}\par\vspace{7pt}}
