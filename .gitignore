@@ -10,3 +10,6 @@ CLAUDE.md
 data/*.parquet
 data/*.log
 data/cleaned/
+
+# Bloomberg intraday futures bars (regenerate with 00b_fetch_bloomberg_ff_intraday.py)
+data/bloomberg/
