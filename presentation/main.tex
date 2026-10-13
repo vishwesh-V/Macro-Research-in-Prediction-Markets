@@ -18,6 +18,26 @@
 \end{frame}}
 
 % =========================================================================
+\section{Motivation}
+% =========================================================================
+\begin{frame}{Kalshi has become a deep market for Fed decisions}
+  \framesubtitle{Contracts traded per month, all KXFEDDECISION meetings (log scale)}
+  \source{01\_eda\_kalshi.py}
+  \begin{columns}[T]
+    \begin{column}{0.68\textwidth}
+      \centering
+      \includegraphics[width=\linewidth]{monthly_volume}
+    \end{column}
+    \begin{column}{0.28\textwidth}
+      \vspace{6pt}
+      \keyfig{$\sim$10$\times$}{jump in monthly volume in spring 2025}
+      \keyfig{620M}{contracts traded on FOMC decisions since 2023}
+      \keyfig{1\textcent}{median bid--ask spread}
+    \end{column}
+  \end{columns}
+\end{frame}
+
+% =========================================================================
 \section{Replication}
 % =========================================================================
 \begin{frame}{We replicate Diercks--Katz--Wright and improve on it}
@@ -50,18 +70,18 @@
 \section{Calibration}
 % =========================================================================
 \begin{frame}{Fed-decision prices show a favorite--longshot pattern}
-  \framesubtitle{Share of contracts that paid out, by price, 1--21 days before the meeting}
+  \framesubtitle{Share of contracts that paid out, by price; quotes every minute, 0--60 days before the meeting}
   \source{02\_calibration\_kalshi.py}
   \begin{columns}[T]
     \begin{column}{0.6\textwidth}
       \centering
-      \includegraphics[height=5.6cm]{reliability_fed}
+      \includegraphics[height=5.6cm]{reliability_minute}
     \end{column}
     \begin{column}{0.36\textwidth}
       \vspace{10pt}
-      \keyfig{0.5\%}{payout rate of contracts priced 1--10\textcent{} (avg.\ price 3.1\textcent)}
-      \keyfig{99.3\%}{payout rate of contracts priced 90--99\textcent{} (avg.\ 95.3\textcent)}
-      {\footnotesize\color{sloangray}Bubble size = forecasts. 632 forecasts, 28 meetings. Middle bins hold 2--6 meetings each.\par}
+      \keyfig{0.1\%}{payout rate of contracts priced 1--10\textcent{} (avg.\ price 3.0\textcent)}
+      \keyfig{99.8\%}{payout rate of contracts priced 90--99\textcent{} (avg.\ 95.5\textcent)}
+      {\footnotesize\color{sloangray}Bubble size = contract-hours, 28 meetings. Descriptive: includes meeting day. The daily 16:00 snapshots used for the tests show the same pattern (appendix).\par}
     \end{column}
   \end{columns}
 \end{frame}
@@ -167,6 +187,46 @@
 \end{frame}
 
 % =========================================================================
+\section{Next steps}
+% =========================================================================
+\begin{frame}{Next: a prediction model. Which direction should we take?}
+  \framesubtitle{Three candidate targets built on what we found; we would like your feedback}
+  \centering
+  \begin{tikzpicture}[
+      inbox/.style={draw=rule, fill=white, line width=0.6pt, align=left, font=\scriptsize,
+        text width=3.5cm, minimum height=0.7cm, inner sep=3pt},
+      mbox/.style={draw=rule, fill=white, line width=0.6pt, align=left, font=\scriptsize,
+        text width=3.0cm, minimum height=0.7cm, inner sep=3pt},
+      tbox/.style={draw=sloanred, fill=wash, line width=0.7pt, align=left, font=\scriptsize,
+        text width=5.0cm, minimum height=0.95cm, inner sep=3pt},
+      head/.style={font=\scriptsize\bfseries, text=sloanred, anchor=south west},
+      arr/.style={-{Stealth[length=5pt]}, sloanred, line width=1pt}]
+    % inputs
+    \node[inbox] (i1) at (0,0) {\textbf{Kalshi distributions}\\ Fed, CPI, payrolls};
+    \node[inbox, below=0.12cm of i1] (i2) {\textbf{Fed funds futures}\\ daily since 2000};
+    \node[inbox, below=0.12cm of i2] (i3) {\textbf{Macro surprises}\\ CPI, payrolls vs.\ consensus};
+    \node[inbox, below=0.12cm of i3] (i4) {\textbf{Market state}\\ spread, volume, Kalshi--futures gap};
+    \node[head] at (i1.north west) {Inputs};
+    % models
+    \node[mbox, right=0.75cm of i1, yshift=-0.45cm] (m1) {\textbf{Regularized (ordered) logit}\\ interpretable baseline};
+    \node[mbox, below=0.12cm of m1] (m2) {\textbf{Gradient boosting}\\ nonlinear, small data};
+    \node[mbox, below=0.12cm of m2] (m3) {\textbf{Linear attention}\\ in the spirit of Kelly et al.};
+    \node[head] at ([yshift=0.33cm]m1.north west) {Models};
+    % targets
+    \node[tbox, right=0.75cm of m1, yshift=0.33cm] (t1) {\textbf{A. Fed surprise:} actual decision minus the market-implied move the day before};
+    \node[tbox, below=0.12cm of t1] (t2) {\textbf{B. Recalibrated Kalshi:} correct the $\beta > 1$ bias; does it beat raw prices out of sample?};
+    \node[tbox, below=0.12cm of t2] (t3) {\textbf{C. Macro print surprise:} CPI and payrolls vs.\ the Kalshi median (RQ3)};
+    \node[head] at (t1.north west) {Targets};
+    \draw[arr] ([xshift=0.08cm]i2.east |- m2.west) -- (m2.west);
+    \draw[arr] (m2.east) -- ([xshift=-0.02cm]t2.west);
+  \end{tikzpicture}
+
+  \vspace{4pt}
+  \raggedright
+  {\footnotesize\textbf{Questions for you:} Which target is most useful? Is pooling with futures back to 2000 (about 200 meetings) credible? Which machine-learning method fits a sample this small?\par}
+\end{frame}
+
+% =========================================================================
 % Appendix
 % =========================================================================
 \sloanappendix
@@ -180,7 +240,7 @@
       \begin{itemize}\footnotesize
         \item \textbf{RQ1 Calibration.} Are Kalshi prices rational forecasts? Favorite--longshot bias? Better than futures and surveys? \emph{First results in.}
         \item \textbf{RQ2 Price discovery.} How fast do prices absorb CPI, payrolls and FOMC news vs.\ futures? \emph{Lead--lag started.}
-        \item \textbf{RQ3 Forecasting.} Use Kalshi distributions to predict CPI, unemployment and GDP. \emph{Not started.}
+        \item \textbf{RQ3 Forecasting.} Use Kalshi distributions to predict policy and macro surprises. \emph{Directions proposed for feedback.}
       \end{itemize}
     \end{column}
     \begin{column}{0.47\textwidth}
@@ -221,15 +281,6 @@
     \item Futures: Bloomberg FF1--FF13, EFFR and target range, daily 2000--2026; 1-minute bid/ask bars Mar--Oct 2026.
     \item Fed outcomes: 19 holds, 5 cuts of 25bp, 1 cut of 50bp (Sep 2024), 3 hikes of 25bp.
   \end{itemize}
-\end{frame}
-
-\begin{frame}{Kalshi has become a deep market for Fed decisions}
-  \framesubtitle{Contracts traded per month, all KXFEDDECISION meetings (log scale)}
-  \source{01\_eda\_kalshi.py}
-  \centering
-  \includegraphics[width=0.85\linewidth]{monthly_volume}
-
-  {\footnotesize\color{sloangray}620M contracts since 2023; volume rose about 10$\times$ in spring 2025. Median bid--ask spread 1\textcent.\par}
 \end{frame}
 
 \begin{frame}{Literature: what is known and what we add}
@@ -343,11 +394,21 @@
   {\footnotesize\color{sloangray}Mean log score 0.07 at 1 day, 0.28 at 30 days; median at 1--21 days 0.05 vs.\ mean 0.14.\par}
 \end{frame}
 
-\begin{frame}{Minute-level reliability shows the same S-shape}
-  \framesubtitle{Descriptive only: raw mid quotes every minute, 0--60 days, includes meeting day}
+\begin{frame}{Daily snapshots show the same S-shape}
+  \framesubtitle{Main specification: 16:00 ET mid, normalized, 1--21 days; 632 forecasts, 28 meetings}
   \source{02\_calibration\_kalshi.py}
-  \centering
-  \includegraphics[height=5.6cm]{reliability_minute}
+  \begin{columns}[T]
+    \begin{column}{0.6\textwidth}
+      \centering
+      \includegraphics[height=5.6cm]{reliability_fed}
+    \end{column}
+    \begin{column}{0.36\textwidth}
+      \vspace{10pt}
+      \keyfig{0.5\%}{payout rate of contracts priced 1--10\textcent{} (avg.\ price 3.1\textcent)}
+      \keyfig{99.3\%}{payout rate of contracts priced 90--99\textcent{} (avg.\ 95.3\textcent)}
+      {\footnotesize\color{sloangray}Bubble size = forecasts. Middle bins hold 2--6 meetings each. This sample feeds the calibration regression.\par}
+    \end{column}
+  \end{columns}
 \end{frame}
 
 \begin{frame}{Specification fixed before any significance test}
