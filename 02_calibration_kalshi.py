@@ -225,6 +225,21 @@ def bootstrap_joint_p(boots, estimate, null):
 
 
 @app.function(hide_code=True)
+def cluster_bootstrap(X, y, g, n_boot, seed):
+    """Coefficients of logistic regressions on whole clusters resampled with replacement (pairs cluster
+    bootstrap). Resamples with no finite estimate (perfect separation) are skipped."""
+    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        rows = np.concatenate([rows_of[k] for k in rng.integers(0, len(rows_of), len(rows_of))])
+        r = fit_logit(X[rows], y[rows])
+        if r is not None:
+            boots.append(r[0])
+    return np.array(boots)
+
+
+@app.function(hide_code=True)
 def calibration_regression(y, f, clusters, n_boot=999, seed=0):
     """Logistic calibration regression P(Y = 1 | f) = Λ(α + β·logit f), fitted by maximum likelihood.
 
@@ -241,18 +256,10 @@ def calibration_regression(y, f, clusters, n_boot=999, seed=0):
     d = b - np.array([0.0, 1.0])
     se = np.sqrt(np.diag(V))
 
-    rows_of = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
-    rng = np.random.default_rng(seed)
-    boots = []
-    for _ in range(n_boot):
-        rows = np.concatenate([rows_of[k] for k in rng.integers(0, len(rows_of), len(rows_of))])
-        r = fit_logit(X[rows], y[rows])
-        if r is not None:
-            boots.append(r[0])
-    boots = np.array(boots)
+    boots = cluster_bootstrap(X, y, g, n_boot, seed)
     lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
     return dict(
-        forecasts=len(y), clusters=len(rows_of),
+        forecasts=len(y), clusters=g.max() + 1,
         alpha=b[0], alpha_se=se[0], alpha_ci=f"[{lo[0]:.2f}, {hi[0]:.2f}]",
         beta=b[1], beta_se=se[1], beta_ci=f"[{lo[1]:.2f}, {hi[1]:.2f}]",
         p_alpha_0=math.erfc(abs(d[0] / se[0]) / math.sqrt(2)),
@@ -324,6 +331,62 @@ def calibration_curves_chart(results, field, domain, colors, legend_title, title
                  alt.Tooltip("fitted:Q", format=".3f", title="Fitted P(YES)")],
     )
     return (_diagonal + _lines).properties(width=380, height=380, title=title)
+
+
+@app.function(hide_code=True)
+def rolling_calibration(forecasts, window, n_boot=499, seed=0):
+    """The calibration regression Λ(α + β·logit f) on every run of `window` consecutive meetings, ordered by meeting
+    date. Point estimates by maximum likelihood, 95% percentile intervals from the meeting bootstrap of
+    `calibration_regression`. A window in which the outcome is perfectly separated has no finite estimate; its
+    row has NaN coefficients."""
+    meetings = forecasts.groupby("event_ticker").meeting_date.first().sort_values()
+    rows = []
+    for i in range(len(meetings) - window + 1):
+        _in = meetings.index[i:i + window]
+        x = forecasts[forecasts.event_ticker.isin(_in)]
+        X = np.column_stack([np.ones(len(x)), np.log(x.f / (1 - x.f))])
+        y = x.y.to_numpy(dtype=float)
+        row = dict(first_meeting=meetings.iloc[i], last_meeting=meetings.iloc[i + window - 1],
+                   meetings=window, forecasts=len(x),
+                   after_break=(meetings.iloc[i:i + window] >= LIQUIDITY_BREAK).mean())
+        fit = fit_logit(X, y)
+        if fit is None:
+            rows.append(row)
+            continue
+        boots = cluster_bootstrap(X, y, pd.factorize(x.event_ticker)[0], n_boot, seed)
+        lo, hi = np.percentile(boots, [2.5, 97.5], axis=0)
+        rows.append({**row, "alpha": fit[0][0], "alpha_lo": lo[0], "alpha_hi": hi[0],
+                     "beta": fit[0][1], "beta_lo": lo[1], "beta_hi": hi[1], "boot_ok": len(boots) / n_boot})
+    return pd.DataFrame(rows, columns=["first_meeting", "last_meeting", "meetings", "forecasts", "after_break",
+                                       "alpha", "alpha_lo", "alpha_hi", "beta", "beta_lo", "beta_hi", "boot_ok"])
+
+
+@app.function(hide_code=True)
+def rolling_coefficient_chart(rolling, coef, null, title):
+    """One coefficient of the rolling calibration regression against the last meeting in each window, with its 95%
+    bootstrap band, the calibrated value `null`, and the liquidity break."""
+    _base = alt.Chart(rolling.dropna(subset=[coef])).encode(
+        x=alt.X("last_meeting:T", title="Last meeting in window"))
+    _band = _base.mark_area(color="#86b6ef", opacity=0.35).encode(
+        y=alt.Y(f"{coef}_lo:Q", title=coef), y2=f"{coef}_hi:Q")
+    _line = _base.mark_line(color="#104281", strokeWidth=2).encode(y=f"{coef}:Q")
+    _points = _base.mark_circle(color="#104281", size=64, opacity=1).encode(
+        y=f"{coef}:Q",
+        tooltip=[alt.Tooltip("first_meeting:T", title="First meeting"),
+                 alt.Tooltip("last_meeting:T", title="Last meeting"),
+                 alt.Tooltip(f"{coef}:Q", format=".2f"),
+                 alt.Tooltip(f"{coef}_lo:Q", format=".2f", title="95% low"),
+                 alt.Tooltip(f"{coef}_hi:Q", format=".2f", title="95% high"),
+                 alt.Tooltip("forecasts:Q", title="Forecasts"),
+                 alt.Tooltip("after_break:Q", format=".0%", title="Meetings from May 2025"),
+                 alt.Tooltip("boot_ok:Q", format=".2f")],
+    )
+    _null = alt.Chart(pd.DataFrame({"y": [null]})).mark_rule(color="#9a9994", strokeDash=[4, 4]).encode(y="y:Q")
+    _break = alt.Chart(pd.DataFrame({"x": [LIQUIDITY_BREAK], "label": ["Liquidity break"]}))
+    _break = (_break.mark_rule(color="#9a9994").encode(x="x:T")
+              + _break.mark_text(align="left", dx=4, dy=-6, color="#6b6a66").encode(
+                  x="x:T", y=alt.value(0), text="label:N"))
+    return (_band + _null + _break + _line + _points).properties(width=560, height=220, title=title)
 
 
 @app.cell(hide_code=True)
@@ -942,6 +1005,54 @@ def regime(sample):
         mo.ui.table(regime_fit.round(3), selection=None),
         mo.md("**Change from before to after May 2025**"),
         mo.ui.table(regime_diff.round(3), selection=None),
+    ])
+    return
+
+
+@app.cell(hide_code=True)
+def rolling_md():
+    mo.md(r"""
+    ## 8 · Rolling calibration regression (descriptive)
+
+    Section 7 splits the meetings at one date chosen in advance. Here the regression of section 6 is refitted on
+    every run of consecutive meetings (ordered by meeting date) to show how $\alpha$ and $\beta$ move over time,
+    without choosing a break. Each point is one window, plotted at its last meeting, so it uses only meetings held
+    by that date. The band is the 95% meeting-bootstrap interval (499 resamples); the dashed line is the
+    calibrated value ($\beta = 1$, $\alpha = 0$).
+
+    **Read it as a picture, not a test.** Neighbouring windows share all but one meeting, so the points are
+    strongly dependent, and a step in the line is usually one meeting entering or leaving the window: hover a
+    point to see the window, and compare with *Which meetings drive the score* in section 3. With 8 to 16 meetings
+    per window a single surprise meeting is a large share of the sample. A window in which some forecast level
+    perfectly separates YES from NO has no finite estimate and is left out (listed below the charts), and
+    `boot_ok` well below 1 means the band is pulled down, as in section 6.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def rolling_controls():
+    rolling_horizon = mo.ui.dropdown(options=list(HORIZON_GROUPS), value="1–21 days (main)", label="Days to meeting")
+    rolling_window = mo.ui.slider(8, 16, value=10, label="Meetings per window", show_value=True)
+    mo.hstack([rolling_horizon, rolling_window], justify="start", gap=2)
+    return rolling_horizon, rolling_window
+
+
+@app.cell(hide_code=True)
+def rolling(rolling_horizon, rolling_window, sample):
+    _x = sample[sample.ttm.isin(HORIZON_GROUPS[rolling_horizon.value])]
+    mo.stop(_x.event_ticker.nunique() < rolling_window.value,
+            mo.md(f"**{_x.event_ticker.nunique()} meetings in this group**, fewer than one window."))
+    rolling_fit = rolling_calibration(_x, rolling_window.value)
+    _separated = rolling_fit[rolling_fit.beta.isna()]
+    mo.vstack([
+        rolling_coefficient_chart(rolling_fit, "beta", 1.0,
+                                  f"Slope β · {rolling_window.value}-meeting windows · {rolling_horizon.value}"),
+        rolling_coefficient_chart(rolling_fit, "alpha", 0.0,
+                                  f"Intercept α · {rolling_window.value}-meeting windows · {rolling_horizon.value}"),
+        mo.md(f"**No finite estimate (perfect separation):** {len(_separated)} of {len(rolling_fit)} windows"
+              + "".join(f"<br>{r.first_meeting:%b %Y} – {r.last_meeting:%b %Y}" for r in _separated.itertuples())),
+        mo.ui.table(rolling_fit.round(3), selection=None),
     ])
     return
 
