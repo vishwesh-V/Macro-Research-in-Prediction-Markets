@@ -59,3 +59,13 @@ SELECT
     (c.bid_close + c.ask_close) / 2 AS kalshi_p
 FROM g
 ASOF JOIN candles_clean c ON g.ticker = c.ticker AND g.snapshot_ts >= c.ts;
+
+
+-- name: minute_mids
+-- Every candle's bid/ask mid for a list of contracts, for the minute-level reliability diagram.
+-- Candles exist only when something changed; the notebook carries each mid forward to every minute.
+-- Parameter: $tickers (list of contract tickers).
+SELECT ticker, ts, (bid_close + ask_close) / 2 AS mid
+FROM candles_clean
+WHERE ticker IN (SELECT unnest($tickers))
+ORDER BY ticker, ts;

@@ -26,6 +26,12 @@ with app.setup(hide_code=True):
     ROOT = Path(__file__).resolve().parent
     FF_XLSX = ROOT / "data/KalshiProjectFedFunds.xlsx"
     CLEAN_CANDLES = ROOT / "data/cleaned/kalshi_candles_1m.parquet"
+    # 1-minute bid/ask bars from data/KalshiProjectFFIntraday_template.xlsx, refreshed on a Bloomberg Terminal
+    # (the data of 04_leadlag_fedfunds_kalshi.py); only the minute-level reliability diagram uses them.
+    INTRADAY_XLSX = ROOT / "data/bloomberg/ff_intraday.xlsx"
+    INTRADAY_CACHE = ROOT / "data/bloomberg/ff_intraday_1m.parquet"  # rebuilt when the workbook is newer
+    TZ = "America/New_York"  # the Terminal's time zone
+    DECISION_HOUR = 14  # FOMC statements are released at 14:00 ET
     FF_COLS = [f"FF{n}" for n in range(1, 14)]  # FFn is the contract for month n - 1 relative to the date
     SAMPLE_START = pd.Timestamp("2021-01-01")  # the guide's sample; earlier far contracts have stale prints
     STEP = 0.25  # one policy move, in percentage points
@@ -297,6 +303,104 @@ def calibration_curves_chart(results, field, domain, colors, legend_title, title
                  alt.Tooltip("fitted:Q", format=".3f", title="Fitted P(YES)")],
     )
     return (_diagonal + _lines).properties(width=380, height=380, title=title)
+
+
+@app.function(hide_code=True)
+def source_reliability_chart(rel, size, size_title, title):
+    """Reliability diagram with one color per source (Kalshi, Futures); point size is `size`."""
+    scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
+    diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
+        x="p:Q", y="p:Q")
+    points = alt.Chart(rel).mark_circle(opacity=0.9, stroke="#fcfcfb", strokeWidth=2).encode(
+        x=alt.X("mean_p:Q", title="Predicted", axis=alt.Axis(format="%"), scale=scale),
+        y=alt.Y("observed:Q", title="Observed", axis=alt.Axis(format="%"), scale=scale),
+        color=alt.Color("source:N", scale=alt.Scale(domain=["Kalshi", "Futures"], range=["#2a78d6", "#eb6834"]),
+                        title="Source"),
+        size=alt.Size(f"{size}:Q", title=size_title, scale=alt.Scale(range=[60, 600])),
+        tooltip=["source:N", alt.Tooltip("bin_from:Q", format=".1f", title="Bin from"),
+                 alt.Tooltip(f"{size}:Q", format=",.0f", title=size_title), "meetings:Q",
+                 alt.Tooltip("mean_p:Q", format=".3f", title="Mean forecast"),
+                 alt.Tooltip("observed:Q", format=".3f", title="Share YES")],
+    )
+    return (diagonal + points).properties(width=380, height=380, title=title)
+
+
+@app.function(hide_code=True)
+def load_intraday_bars(path, cache):
+    """Long table of the Bloomberg 1-minute bars: contract_month, side (bid/ask), ts (end of the bar, ET), price.
+
+    Bloomberg labels a bar by the minute it starts and Kalshi labels a candle by the minute it ends, so the
+    Bloomberg label is moved one minute later, as in 04_leadlag_fedfunds_kalshi.py.
+    """
+    if cache.exists() and cache.stat().st_mtime > path.stat().st_mtime:
+        bars = pd.read_parquet(cache)
+    else:
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True, data_only=True)
+        parts = []
+        for name in wb.sheetnames[2:]:  # README and Settings first, then one sheet per contract month
+            rows = list(wb[name].iter_rows(min_row=6, max_col=5, values_only=True))
+            for side, (i, j) in {"bid": (0, 1), "ask": (3, 4)}.items():
+                d = pd.DataFrame([(r[i], r[j]) for r in rows if r[i] is not None], columns=["ts", "price"])
+                parts.append(d.assign(contract_month=name, side=side))
+        bars = pd.concat(parts, ignore_index=True)
+        bars["price"] = pd.to_numeric(bars.price, errors="coerce")
+        bars.dropna().to_parquet(cache)
+    bars["ts"] = pd.to_datetime(bars.ts).dt.tz_localize(TZ) + pd.Timedelta(minutes=1)
+    return bars
+
+
+@app.function(hide_code=True)
+def cme_minutes(start, end):
+    """Every minute CME Globex trades fed funds futures: Sunday 18:00 to Friday 17:00 ET, paused 17:00-18:00."""
+    grid = pd.date_range(start.ceil("min"), end, freq="min", tz=TZ)
+    wd, hr = grid.dayofweek, grid.hour
+    return grid[~((wd == 5) | ((wd == 4) & (hr >= 17)) | ((wd == 6) & (hr < 18)) | (hr == 17))]
+
+
+@app.function(hide_code=True)
+def next_meeting_move(prices, times, sessions, meetings, daily):
+    """Futures-implied expected move (bp) at the next FOMC meeting, one value per row: Steps 1-5 of the guide
+    applied to whatever prices the rows hold. Same as in 04_leadlag_fedfunds_kalshi.py.
+
+    prices: one column per contract month ("YYYY-MM"), quoted as 100 minus the rate.
+    times: naive ET timestamps; the next meeting is the first decision (14:00 ET) after each.
+    sessions: the date each row's r0 and realized EFFR are taken from.
+    daily: effr and r0 by calendar date, forward-filled.
+    """
+    meeting_idx = pd.DatetimeIndex(meetings)
+    decision = meeting_idx + pd.Timedelta(hours=DECISION_HOUR)
+    D = pd.DatetimeIndex(meeting_idx[np.searchsorted(decision, times, side="right")])
+    sessions = pd.DatetimeIndex(sessions)
+    r_before = daily.r0.reindex(sessions).to_numpy()
+    cum_effr = daily.effr.cumsum()
+    with_meeting = {(d.year, d.month) for d in meetings}
+    move = np.full(len(times), np.nan)
+    method = np.full(len(times), "", dtype=object)
+    for d in D.unique():
+        sel = np.flatnonzero(D == d)
+        after = d + pd.offsets.MonthBegin(1)
+        after_key, own_key = f"{after.year}-{after.month:02d}", f"{d.year}-{d.month:02d}"
+        if (after.year, after.month) not in with_meeting and after_key in prices:
+            r_after = 100 - prices[after_key].to_numpy()[sel]
+            method[sel] = "B"
+        elif own_key in prices:
+            n_days = calendar.monthrange(d.year, d.month)[1]
+            rbar = 100 - prices[own_key].to_numpy()[sel]
+            s = sessions[sel]
+            same = (s.year == d.year) & (s.month == d.month)
+            month_start = pd.Timestamp(d.year, d.month, 1)
+            # EFFR already printed this month: days 1 .. session day - 1 (eq. 8 of the guide)
+            before_start = cum_effr.get(month_start - pd.Timedelta(days=1), 0.0)
+            realized = np.where(same, cum_effr.reindex(s - pd.Timedelta(days=1)).to_numpy() - before_start, 0.0)
+            realized = np.where(same & (s.day == 1), 0.0, realized)
+            n_real = np.where(same, s.day - 1, 0)
+            r_after = (n_days * rbar - realized - (d.day - n_real) * r_before[sel]) / (n_days - d.day)
+            method[sel] = "A"
+        else:
+            continue
+        move[sel] = (r_after - r_before[sel]) * 100
+    return pd.DataFrame({"meeting": D, "method": method, "futures_bp": move})
 
 
 @app.cell(hide_code=True)
@@ -674,24 +778,106 @@ def reliability(scores_long):
         .agg(forecasts=("p", "size"), meetings=("event_ticker", "nunique"), mean_p=("p", "mean"),
              observed=("y", "mean"))
     )
-    _scale = alt.Scale(domain=[-0.03, 1.03], nice=False)
-    _source_color = alt.Color("source:N", scale=alt.Scale(domain=["Kalshi", "Futures"], range=["#2a78d6", "#eb6834"]),
-                              title="Source")
-    _diagonal = alt.Chart(pd.DataFrame({"p": [0, 1]})).mark_line(color="#9a9994", strokeDash=[4, 4]).encode(
-        x="p:Q", y="p:Q")
-    _points = alt.Chart(_rel).mark_circle(opacity=0.9, stroke="#fcfcfb", strokeWidth=2).encode(
-        x=alt.X("mean_p:Q", title="Predicted", axis=alt.Axis(format="%"), scale=_scale),
-        y=alt.Y("observed:Q", title="Observed", axis=alt.Axis(format="%"), scale=_scale),
-        color=_source_color,
-        size=alt.Size("forecasts:Q", title="Forecasts", scale=alt.Scale(range=[60, 600])),
-        tooltip=["source:N", alt.Tooltip("bin_from:Q", format=".1f", title="Bin from"), "forecasts:Q", "meetings:Q",
-                 alt.Tooltip("mean_p:Q", format=".3f", title="Mean forecast"),
-                 alt.Tooltip("observed:Q", format=".3f", title="Share YES")],
-    )
     mo.hstack([
-        (_diagonal + _points).properties(width=380, height=380, title="Reliability · 1–30 days, pooled"),
+        source_reliability_chart(_rel, "forecasts", "Forecasts", "Reliability · 1–30 days, pooled"),
         mo.ui.table(_rel.round(4), selection=None),
     ], widths=[1, 1])
+    return
+
+
+@app.cell(hide_code=True)
+def minute_reliability_md():
+    mo.md("""
+    ### Reliability every minute, both sources (descriptive)
+
+    **Descriptive only, not part of the tests.** The same diagram from 1-minute data instead of one 15:00 ET
+    snapshot a day, over the window of the Bloomberg intraday bars (`data/bloomberg/ff_intraday.xlsx`, the data of
+    `04_leadlag_fedfunds_kalshi.py`; Bloomberg keeps about 140 business days of them). Every CME minute (Sunday
+    18:00 to Friday 17:00 ET, paused 17:00–18:00), each settled contract of the **next** meeting gets two forecasts:
+
+    - **Futures:** the expected move at the next meeting from the bid/ask mids of the contracts in force that
+      minute (the method of 04, the guide's Steps 1–5), split over the buckets as above.
+    - **Kalshi:** the contract's raw bid/ask mid in force at the end of that minute (candles carried forward).
+
+    Each minute in which both exist counts once, so point size is contract-hours. The window runs up to the 2pm
+    decision, so the morning of meeting day is included. The clip and the buckets picked above apply; 10¢ bins.
+    Only the few meetings decided inside the window are scored: more minutes are not more independent evidence,
+    so read each bin's `meetings`, not its hours.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def minute_panel(con, contracts, futures, meeting_dates, queries):
+    mo.stop(not INTRADAY_XLSX.exists(),
+            mo.md(f"**Missing `{INTRADAY_XLSX.relative_to(ROOT)}`.** Refresh "
+                  "`data/KalshiProjectFFIntraday_template.xlsx` on a Bloomberg Terminal and save it there."))
+    _bars = load_intraday_bars(INTRADAY_XLSX, INTRADAY_CACHE)
+    _days = pd.date_range(futures.date.min(), _bars.ts.max().tz_localize(None).normalize(), freq="D")
+    # Weekends and the days after the workbook's last row carry the last EFFR and r0 forward.
+    _daily = futures.set_index("date")[["effr", "r0"]].reindex(_days).ffill()
+    _grid = cme_minutes(_bars.ts.min(), _bars.ts.max())
+    _wide = _bars.pivot_table(index="ts", columns=["contract_month", "side"], values="price", aggfunc="last")
+    _wide = _wide.reindex(_wide.index.union(_grid)).sort_index().ffill().reindex(_grid)
+    _prices = pd.DataFrame({m: (_wide[(m, "bid")] + _wide[(m, "ask")]) / 2 for m in _wide.columns.levels[0]})
+    # A session runs 18:00 to 17:00 ET and is dated by the day it ends.
+    _session = (_grid + pd.Timedelta(hours=6)).tz_localize(None).normalize()
+    _move = next_meeting_move(_prices, _grid.tz_localize(None), _session, meeting_dates, _daily)
+
+    _settled = contracts[(contracts.status == "finalized") & contracts.meeting_date.isin(_move.meeting.unique())]
+    _k = con.execute(queries["minute_mids"], {"tickers": _settled.ticker.tolist()}).df()
+    _k["ts"] = pd.to_datetime(_k.ts, utc=True).dt.tz_convert(TZ)
+    _mids = _k.pivot_table(index="ts", columns="ticker", values="mid", aggfunc="last")
+    _mids = _mids.reindex(_mids.index.union(_grid)).sort_index().ffill().reindex(_grid)
+
+    _parts = []
+    for _c in _settled.itertuples():
+        _sel = (_move.meeting == _c.meeting_date).to_numpy()
+        _lo, _hi = MOVE_STEPS[_c.move]
+        _parts.append(pd.DataFrame({
+            "ts": _grid[_sel], "ticker": _c.ticker, "event_ticker": _c.event_ticker,
+            "meeting_date": _c.meeting_date, "move": _c.move, "y": _c.y,
+            "p_ff": bucket_prob(_move.futures_bp.to_numpy()[_sel] / 25, _lo, _hi),
+            "kalshi_p": _mids[_c.ticker].to_numpy()[_sel] if _c.ticker in _mids else np.nan,
+        }))
+    minute_panel = pd.concat(_parts, ignore_index=True).dropna(subset=["p_ff", "kalshi_p"])
+    minute_panel["group"] = np.where(minute_panel.move.isin(CORE_MOVES), "Hold and ±25", "Tails (>25bp)")
+    return (minute_panel,)
+
+
+@app.cell(hide_code=True)
+def minute_reliability(minute_panel, score_group):
+    _m = minute_panel if score_group.value == "All buckets" else minute_panel[minute_panel.group == score_group.value]
+    _long = []
+    for _name, _col in [("Kalshi", "kalshi_p"), ("Futures", "p_ff")]:
+        _p = _m[_col].clip(P_FLOOR, 1 - P_FLOOR)
+        _long.append(_m.assign(source=_name, p=_p, brier=(_p - _m.y) ** 2,
+                               log_loss=-(_m.y * np.log(_p) + (1 - _m.y) * np.log(1 - _p))))
+    _long = pd.concat(_long)
+    _rel = (
+        _long.assign(bin_from=np.minimum(np.floor(_long.p * 10) / 10, 0.9))
+        .groupby(["source", "bin_from"], as_index=False)
+        .agg(minutes=("p", "size"), contracts=("ticker", "nunique"), meetings=("event_ticker", "nunique"),
+             mean_p=("p", "mean"), observed=("y", "mean"))
+        .assign(contract_hours=lambda d: d.minutes / 60)
+        [["source", "bin_from", "contract_hours", "contracts", "meetings", "mean_p", "observed"]]
+    )
+    _scores = (_long.groupby("source", sort=False)
+               .agg(minutes=("p", "size"), meetings=("event_ticker", "nunique"),
+                    brier=("brier", "mean"), log_loss=("log_loss", "mean"))
+               .assign(contract_hours=lambda d: d.minutes / 60).drop(columns="minutes").reset_index())
+    _meetings = ", ".join(f"{d:%Y-%m-%d}" for d in sorted(_m.meeting_date.unique()))
+    mo.vstack([
+        mo.md(f"**{len(_m):,}** contract-minutes, {_m.ts.min():%Y-%m-%d %H:%M} to {_m.ts.max():%Y-%m-%d %H:%M} ET; "
+              f"meetings {_meetings}. Scores are averaged over minutes."),
+        mo.hstack([
+            source_reliability_chart(_rel, "contract_hours", "Contract-hours", "Reliability · every minute"),
+            mo.ui.tabs({
+                "Every bin": mo.ui.table(_rel.round(4), selection=None),
+                "Scores": mo.ui.table(_scores.round(4), selection=None),
+            }),
+        ], widths=[1, 1]),
+    ])
     return
 
 
