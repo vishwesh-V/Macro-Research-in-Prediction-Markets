@@ -57,7 +57,7 @@ with app.setup(hide_code=True):
     # 2026, plus all later ones). Everything in this notebook uses only earlier meetings until SCORE_HOLDOUT is True.
     # Flip it once, after the feature list, alpha grid and decay rules are frozen, and report what comes out.
     HOLDOUT_FROM = pd.Timestamp("2026-03-01")
-    SCORE_HOLDOUT = False
+    SCORE_HOLDOUT = True
 
     alt.data_transformers.disable_max_rows()
 
@@ -230,6 +230,59 @@ def bracket_value(strikes, results, step):
     return yes.max() + step / 2 if len(yes) else no.min() - step / 2
 
 
+@app.function(hide_code=True)
+def connect_kalshi(candles_path):
+    """DuckDB connection with the Kalshi views, the named queries, and one row per Fed decision contract."""
+    con = duckdb.connect()
+    con.execute((ROOT / "sql/kalshi_views.sql").read_text().replace("'data/", f"'{ROOT}/data/"))
+    con.execute(read_queries(ROOT / "sql/kalshi_eda_macro.sql")[""].replace("'data/", f"'{ROOT}/data/"))
+    con.execute(f"CREATE VIEW candles_clean AS SELECT * FROM read_parquet('{candles_path}')")
+    queries = read_queries(ROOT / "sql/fedfunds_vs_kalshi.sql") | read_queries(ROOT / "sql/macrotron_v0.sql")
+    contracts = con.sql("""
+        SELECT ticker, event_ticker, meeting_date, move, move_bps, status, result,
+               CAST(open_time AT TIME ZONE 'America/New_York' AS DATE) AS open_date
+        FROM markets
+        QUALIFY sum(volume) OVER (PARTITION BY event_ticker) > 0  -- drops the untraded duplicate event
+    """).df()
+    contracts["meeting_date"] = pd.to_datetime(contracts.meeting_date)
+    contracts["open_date"] = pd.to_datetime(contracts.open_date)
+    return con, contracts, queries
+
+
+@app.function(hide_code=True)
+def build_panel(con, contracts, implied, queries):
+    """Section 1's panel: one row per (meeting, futures trading day) with both expected moves and the gap; and the
+    per-contract quotes behind it."""
+    grid = contracts.merge(implied[["date", "meeting_date", "x", "method"]], on="meeting_date")
+    grid = grid[(grid.date >= grid.open_date) & (grid.date < grid.meeting_date)]
+    con.register("snapshot_grid", grid[["ticker", "date"]].drop_duplicates().assign(date=lambda d: d.date.dt.date))
+    snaps = con.execute(queries["snapshots"], {"snapshot_hour": SNAPSHOT_HOUR_ET}).df()
+    snaps["date"] = pd.to_datetime(snaps.date)
+
+    quotes = grid.merge(snaps, on=["ticker", "date"], how="left")  # one row per contract and day
+    quotes["w"] = quotes.kalshi_p * quotes.move_bps
+    open_end = quotes.move.isin(["Cut >25", "Hike >25", "Hike >50"])
+    quotes["w_alt"] = quotes.kalshi_p * (quotes.move_bps + np.sign(quotes.move_bps) * OPEN_END_ALT * open_end)
+    n_buckets = contracts.groupby("event_ticker").ticker.nunique().rename("n_buckets")
+    panel = (quotes.groupby(["event_ticker", "meeting_date", "date"], as_index=False)
+             .agg(x_ff=("x", "first"), method=("method", "first"), n_quoted=("kalshi_p", "count"),
+                  sum_mid=("kalshi_p", "sum"), w=("w", "sum"), w_alt=("w_alt", "sum"),
+                  max_spread=("spread", "max"))
+             .merge(n_buckets, on="event_ticker"))
+    panel["complete"] = panel.n_quoted == panel.n_buckets
+    panel["usable"] = panel.complete & (panel.max_spread <= WIDE_SPREAD)  # an empty 0/99¢ book has a meaningless mid
+    panel["x_kalshi"] = panel.w / panel.sum_mid / STEP_BP
+    panel["gap_bp"] = (panel.x_ff - panel.x_kalshi) * STEP_BP
+    panel["x_kalshi_alt"] = panel.w_alt / panel.sum_mid / STEP_BP
+    panel["gap_alt_bp"] = (panel.x_ff - panel.x_kalshi_alt) * STEP_BP
+    panel["days_to_meeting"] = (panel.meeting_date - panel.date).dt.days
+    panel["wide"] = panel.max_spread > WIDE_SPREAD
+    panel["regime"] = np.where(panel.meeting_date >= LIQUIDITY_BREAK, "From May 2025", "Before May 2025")
+    panel["holdout"] = panel.meeting_date >= HOLDOUT_FROM
+    panel = panel.drop(columns=["w", "w_alt"]).sort_values(["event_ticker", "date"]).reset_index(drop=True)
+    return panel, quotes
+
+
 @app.cell(hide_code=True)
 def intro():
     mo.md(r"""
@@ -271,6 +324,7 @@ def dev_log():
        books quoted 0¢/99¢, produced fake 15–30bp gaps and on their own made Kalshi look like the follower. They are
        now dropped everywhere (`usable`). Added section 3b (robustness), section 8 (weekend test) and the list of
        what the holdout run reports (section 5).
+    3. *2026-10-22, holdout scored* (`SCORE_HOLDOUT = True`) on the spec frozen in commit e9b2ba1. No changes after.
     """)
     return
 
@@ -293,20 +347,7 @@ def kalshi_side():
         not (MARKETS_FILE.exists() and TRADES_FILE.exists() and candles_path.exists()),
         mo.md("**Missing Kalshi data.** Run `00_fetch_data_kalshi.py` first (it writes `data/kalshi_*.parquet`)."),
     )
-    con = duckdb.connect()
-    con.execute((ROOT / "sql/kalshi_views.sql").read_text().replace("'data/", f"'{ROOT}/data/"))
-    con.execute(read_queries(ROOT / "sql/kalshi_eda_macro.sql")[""].replace("'data/", f"'{ROOT}/data/"))
-    con.execute(f"CREATE VIEW candles_clean AS SELECT * FROM read_parquet('{candles_path}')")
-    queries = read_queries(ROOT / "sql/fedfunds_vs_kalshi.sql") | read_queries(ROOT / "sql/macrotron_v0.sql")
-
-    contracts = con.sql("""
-        SELECT ticker, event_ticker, meeting_date, move, move_bps, status, result,
-               CAST(open_time AT TIME ZONE 'America/New_York' AS DATE) AS open_date
-        FROM markets
-        QUALIFY sum(volume) OVER (PARTITION BY event_ticker) > 0  -- drops the untraded duplicate event
-    """).df()
-    contracts["meeting_date"] = pd.to_datetime(contracts.meeting_date)
-    contracts["open_date"] = pd.to_datetime(contracts.open_date)
+    con, contracts, queries = connect_kalshi(candles_path)
     mo.md(f"Kalshi: **{contracts.event_ticker.nunique()}** meetings, **{len(contracts)}** contracts; "
           f"quotes from `{candles_path.relative_to(ROOT)}`.")
     return con, contracts, queries
@@ -334,33 +375,7 @@ def panel_md():
 
 @app.cell(hide_code=True)
 def panel_cell(con, contracts, implied, queries):
-    _grid = contracts.merge(implied[["date", "meeting_date", "x", "method"]], on="meeting_date")
-    _grid = _grid[(_grid.date >= _grid.open_date) & (_grid.date < _grid.meeting_date)]
-    con.register("snapshot_grid", _grid[["ticker", "date"]].drop_duplicates().assign(date=lambda d: d.date.dt.date))
-    _snaps = con.execute(queries["snapshots"], {"snapshot_hour": SNAPSHOT_HOUR_ET}).df()
-    _snaps["date"] = pd.to_datetime(_snaps.date)
-
-    quotes = _grid.merge(_snaps, on=["ticker", "date"], how="left")  # one row per contract and day
-    quotes["w"] = quotes.kalshi_p * quotes.move_bps
-    _open_end = quotes.move.isin(["Cut >25", "Hike >25", "Hike >50"])
-    quotes["w_alt"] = quotes.kalshi_p * (quotes.move_bps + np.sign(quotes.move_bps) * OPEN_END_ALT * _open_end)
-    _n_buckets = contracts.groupby("event_ticker").ticker.nunique().rename("n_buckets")
-    panel = (quotes.groupby(["event_ticker", "meeting_date", "date"], as_index=False)
-             .agg(x_ff=("x", "first"), method=("method", "first"), n_quoted=("kalshi_p", "count"),
-                  sum_mid=("kalshi_p", "sum"), w=("w", "sum"), w_alt=("w_alt", "sum"),
-                  max_spread=("spread", "max"))
-             .merge(_n_buckets, on="event_ticker"))
-    panel["complete"] = panel.n_quoted == panel.n_buckets
-    panel["usable"] = panel.complete & (panel.max_spread <= WIDE_SPREAD)  # an empty 0/99¢ book has a meaningless mid
-    panel["x_kalshi"] = panel.w / panel.sum_mid / STEP_BP
-    panel["gap_bp"] = (panel.x_ff - panel.x_kalshi) * STEP_BP
-    panel["x_kalshi_alt"] = panel.w_alt / panel.sum_mid / STEP_BP
-    panel["gap_alt_bp"] = (panel.x_ff - panel.x_kalshi_alt) * STEP_BP
-    panel["days_to_meeting"] = (panel.meeting_date - panel.date).dt.days
-    panel["wide"] = panel.max_spread > WIDE_SPREAD
-    panel["regime"] = np.where(panel.meeting_date >= LIQUIDITY_BREAK, "From May 2025", "Before May 2025")
-    panel["holdout"] = panel.meeting_date >= HOLDOUT_FROM
-    panel = panel.drop(columns=["w", "w_alt"]).sort_values(["event_ticker", "date"]).reset_index(drop=True)
+    panel, quotes = build_panel(con, contracts, implied, queries)
 
     _n_hold = panel[panel.holdout].event_ticker.nunique()
     mo.vstack([
@@ -509,6 +524,64 @@ def robustness(data, panel):
                mo.md("b > 0: Kalshi moves toward futures. d < 0: futures move toward Kalshi. Kalshi's share "
                      "b / (b − d) is left out here because it is meaningless when b < 0.")])
     return (robust,)
+
+
+@app.cell(hide_code=True)
+def cells_md():
+    mo.md(r"""
+    ## 3c · Why does the answer to "who closes the gap" flip? (descriptive, added after the holdout)
+
+    The development meetings had futures moving toward Kalshi; with the holdout pooled in, Kalshi moves toward
+    futures. This splits section 3's slopes (and the noise-robust instrumented version) by cells that differ between
+    the samples. If the flip disappears within cells, it came from the mix of meetings, not from a change over time.
+    Uses all meetings; it tests nothing new, so it doesn't touch the holdout.
+
+    - **Horizon:** days to the meeting. Holdout rows are mostly far-dated meetings.
+    - **Decided:** meetings already decided vs still open on the last futures date.
+    - **Regime:** before or from May 2025, when Kalshi's volume jumped.
+    - **Kalshi liquidity:** tercile of the widest bucket spread that day.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def by_cell(data, futures):
+    # Changes are taken on the full panel (h usable rows ahead within the meeting), then rows are split by the cell
+    # their starting day falls in, so short cells such as 1–7 days keep their 5-day changes.
+    _h = 5
+    _d = data.sort_values(["event_ticker", "date"]).copy()
+    _g = _d.groupby("event_ticker")
+    _d["dk"] = (_g.x_kalshi.shift(-_h) - _d.x_kalshi) * STEP_BP
+    _d["dff"] = (_g.x_ff.shift(-_h) - _d.x_ff) * STEP_BP
+    _d["z_iv"] = _g.gap_bp.shift(2)
+    _d = _d.dropna(subset=["dk", "dff", "z_iv"])
+    _d["horizon"] = pd.cut(_d.days_to_meeting, [0, 7, 30, 90, 10_000], labels=["1–7d", "8–30d", "31–90d", "90d+"])
+    _d["decided"] = np.where(_d.meeting_date <= futures.date.max(), "decided", "still open")
+    _d["liquidity"] = pd.qcut(_d.max_spread.rank(method="first"), 3, labels=["tight", "middle", "wide"])
+
+    def _slopes(x, z):
+        zz, gg = x[z] - x[z].mean(), x.gap_bp - x.gap_bp.mean()
+        den = (zz * gg).sum()
+        return np.array([(zz * (x.dk - x.dk.mean())).sum() / den, (zz * (x.dff - x.dff.mean())).sum() / den])
+
+    _rows = []
+    for _by in ["horizon", "decided", "regime", "liquidity"]:
+        for _cell, _c in _d.groupby(_by, observed=True):
+            if _c.event_ticker.nunique() < 5:
+                continue
+            _row = {"split": _by, "cell": str(_cell), "rows": len(_c), "meetings": _c.event_ticker.nunique(),
+                    "mean gap": round(_c.gap_bp.mean(), 2)}
+            for _z, _tag in [("gap_bp", ""), ("z_iv", " IV")]:
+                _est = _slopes(_c, _z)
+                _lo, _hi = np.nanpercentile(cluster_bootstrap(_c, lambda x, z=_z: _slopes(x, z)), [2.5, 97.5], axis=0)
+                _row[f"b Kalshi 5d{_tag}"] = f"{_est[0]:.2f} [{_lo[0]:.2f}, {_hi[0]:.2f}]"
+                _row[f"d futures 5d{_tag}"] = f"{_est[1]:.2f} [{_lo[1]:.2f}, {_hi[1]:.2f}]"
+            _rows.append(_row)
+    cell_table = pd.DataFrame(_rows)
+    mo.vstack([mo.ui.table(cell_table, selection=None, page_size=20),
+               mo.md("b > 0: Kalshi moves toward futures over the next 5 days. d < 0: futures move toward Kalshi. "
+                     "IV: today's gap instrumented by the gap 2 days earlier (drops one-day noise).")])
+    return (cell_table,)
 
 
 @app.cell(hide_code=True)
