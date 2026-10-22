@@ -35,6 +35,9 @@ with app.setup(hide_code=True):
     WIDE_SPREAD = 0.20  # a bucket quoted wider than this has a mid that says little
     HORIZONS = [1, 5]  # trading days ahead for the targets
     LIQUIDITY_BREAK = pd.Timestamp("2025-05-01")  # same split as 02 and 03
+    OPEN_END_ALT = 12.5  # robustness: open-ended buckets scored half a step further out (cut >25 as -62.5bp)
+    FUTURES_REOPEN_HOUR_ET = 18  # CME Globex reopens Sunday 18:00 ET; the weekend test reads Kalshi an hour before
+    NEWS_WEEKEND_BP = 2.0  # a weekend "with news": futures moved at least this much, Friday settle to Monday settle
 
     # Feature construction, fixed 2026-10-19 with the feature list (section 4), before any results were seen.
     NEWS_TAU_DAYS = 5  # a release's effect decays as exp(-days since / tau): the few-day catch-up in the hypothesis
@@ -131,6 +134,34 @@ def boot_linear(df, features, target, alpha=0.0, cluster="event_ticker", n_boot=
 
 
 @app.function(hide_code=True)
+def closing_stats(df, h, kalshi="x_kalshi", gap="gap_bp", cluster="event_ticker", iv=False):
+    """Section 3's convergence regressions for one panel variant: slopes b (Kalshi) and d (futures) of each market's
+    h-day change on today's gap, and Kalshi's share b / (b - d), with meeting-bootstrap 95% intervals. Changes are
+    taken h rows ahead within a meeting.
+
+    Noise in either market's implied mean reverts, which makes that market look like the follower. With iv=True
+    today's gap is instrumented by the gap two rows earlier, which keeps its persistent part and drops one-day noise."""
+    d = df.sort_values(["event_ticker", "date"]).copy()
+    g = d.groupby("event_ticker")
+    d["dk"] = (g[kalshi].shift(-h) - d[kalshi]) * STEP_BP
+    d["dff"] = (g.x_ff.shift(-h) - d.x_ff) * STEP_BP
+    d["z"] = g[gap].shift(2) if iv else d[gap]
+    d = d.dropna(subset=["dk", "dff", gap, "z"])
+
+    def slope(x, y):
+        z, gg, yy = x.z - x.z.mean(), x[gap] - x[gap].mean(), x[y] - x[y].mean()
+        return (z * yy).sum() / (z * gg).sum()
+
+    def stat(x):
+        b, dd = slope(x, "dk"), slope(x, "dff")
+        return np.array([b, dd, b / (b - dd) if b != dd else np.nan])
+
+    est = stat(d)
+    lo, hi = np.nanpercentile(cluster_bootstrap(d, stat, cluster=cluster), [2.5, 97.5], axis=0)
+    return est, lo, hi, len(d), d[cluster].nunique()
+
+
+@app.function(hide_code=True)
 def ridge_fit_predict(train, test, features, target, alpha):
     """Ridge in closed form on features standardized with the training rows. Neither the intercept nor the FREE
     features are penalized, so as alpha grows the fit tends to AR(1) on the gap, the baseline to beat."""
@@ -214,8 +245,9 @@ def intro():
        (section 3).
     3. Macro news predicts how the gap changes, beyond gap dynamics, microstructure and futures (section 6).
     4. The gap's change is predictable out of sample, beating no-change and mean reversion (section 5).
+    5. Kalshi leads when futures are closed: its weekend moves anticipate where futures reopen (section 8).
 
-    The verdicts are collected in section 7.
+    Robustness checks are in section 3b; the verdicts are collected in section 9.
 
     **Sources reused, not copied.** Futures-implied moves come from `03_fedfunds_vs_kalshi.py`
     (`implied_moves`, the guide's Steps 1–5); Kalshi quotes at 15:00 ET use 03's `snapshots` query in
@@ -235,6 +267,10 @@ def dev_log():
        on decision day, the EFFR a day later): decision days are now blanked. Ridge always chose an end of the alpha
        grid, and shrank the gap coefficient toward 0, i.e. toward "no change" rather than the AR(1) baseline: the
        grid is wider and `gap_bp` is no longer penalized (`FREE`).
+    2. *2026-10-22, run 2 → 3.* The robustness checks (section 3b) showed that 20 of 848 development rows, empty
+       books quoted 0¢/99¢, produced fake 15–30bp gaps and on their own made Kalshi look like the follower. They are
+       now dropped everywhere (`usable`). Added section 3b (robustness), section 8 (weekend test) and the list of
+       what the holdout run reports (section 5).
     """)
     return
 
@@ -289,7 +325,9 @@ def panel_md():
       to sum to 1 ($q_i$). Open-ended buckets count as the next step (cut >25 as −50bp, hike >25 as +50bp), as in
       `sql/kalshi_views.sql`, which biases $x^K$ toward zero when a large move is likely.
     - **Gap** $= (x^{FF} - x^{K}) \times 25$ bp. Positive: futures price more tightening than Kalshi.
-    - Rows where not every bucket is quoted are flagged `complete = False` and left out of the analysis.
+    - Rows where not every bucket is quoted (`complete = False`) or some bucket is wider than `WIDE_SPREAD`
+      are left out (`usable = False`). The wide rows are empty books (0¢ bid, 99¢ ask) whose 50¢ mids create fake
+      gaps of 15–30bp; with them in, section 3's convergence result reverses (see section 3b).
     """)
     return
 
@@ -304,19 +342,25 @@ def panel_cell(con, contracts, implied, queries):
 
     quotes = _grid.merge(_snaps, on=["ticker", "date"], how="left")  # one row per contract and day
     quotes["w"] = quotes.kalshi_p * quotes.move_bps
+    _open_end = quotes.move.isin(["Cut >25", "Hike >25", "Hike >50"])
+    quotes["w_alt"] = quotes.kalshi_p * (quotes.move_bps + np.sign(quotes.move_bps) * OPEN_END_ALT * _open_end)
     _n_buckets = contracts.groupby("event_ticker").ticker.nunique().rename("n_buckets")
     panel = (quotes.groupby(["event_ticker", "meeting_date", "date"], as_index=False)
              .agg(x_ff=("x", "first"), method=("method", "first"), n_quoted=("kalshi_p", "count"),
-                  sum_mid=("kalshi_p", "sum"), w=("w", "sum"), max_spread=("spread", "max"))
+                  sum_mid=("kalshi_p", "sum"), w=("w", "sum"), w_alt=("w_alt", "sum"),
+                  max_spread=("spread", "max"))
              .merge(_n_buckets, on="event_ticker"))
     panel["complete"] = panel.n_quoted == panel.n_buckets
+    panel["usable"] = panel.complete & (panel.max_spread <= WIDE_SPREAD)  # an empty 0/99¢ book has a meaningless mid
     panel["x_kalshi"] = panel.w / panel.sum_mid / STEP_BP
     panel["gap_bp"] = (panel.x_ff - panel.x_kalshi) * STEP_BP
+    panel["x_kalshi_alt"] = panel.w_alt / panel.sum_mid / STEP_BP
+    panel["gap_alt_bp"] = (panel.x_ff - panel.x_kalshi_alt) * STEP_BP
     panel["days_to_meeting"] = (panel.meeting_date - panel.date).dt.days
     panel["wide"] = panel.max_spread > WIDE_SPREAD
     panel["regime"] = np.where(panel.meeting_date >= LIQUIDITY_BREAK, "From May 2025", "Before May 2025")
     panel["holdout"] = panel.meeting_date >= HOLDOUT_FROM
-    panel = panel.drop(columns="w").sort_values(["event_ticker", "date"]).reset_index(drop=True)
+    panel = panel.drop(columns=["w", "w_alt"]).sort_values(["event_ticker", "date"]).reset_index(drop=True)
 
     _n_hold = panel[panel.holdout].event_ticker.nunique()
     mo.vstack([
@@ -326,7 +370,7 @@ def panel_cell(con, contracts, implied, queries):
                          "every section below."), kind="info"),
         mo.md(f"**{len(panel):,}** meeting-days over **{panel.event_ticker.nunique()}** meetings; "
               f"**{panel.complete.mean():.0%}** complete, **{panel[panel.complete].wide.mean():.0%}** of those "
-              f"with a bucket wider than {WIDE_SPREAD * 100:.0f}¢."),
+              f"with a bucket wider than {WIDE_SPREAD * 100:.0f}¢; **{panel.usable.sum():,}** usable rows."),
         mo.ui.table(panel[~panel.holdout].head(50), selection=None),
     ])
     return panel, quotes
@@ -346,7 +390,7 @@ def describe_md():
 
 @app.cell(hide_code=True)
 def describe(panel):
-    _p = panel[panel.complete & (SCORE_HOLDOUT | ~panel.holdout)].copy()
+    _p = panel[panel.usable & (SCORE_HOLDOUT | ~panel.holdout)].copy()
     _p["lag_gap"] = _p.groupby("event_ticker").gap_bp.shift(1)
     _p["horizon"] = pd.cut(_p.days_to_meeting, [0, 7, 30, 60, 120, 1000],
                            labels=["1–7d", "8–30d", "31–60d", "61–120d", "120d+"])
@@ -393,8 +437,8 @@ def convergence_md():
 
 @app.cell(hide_code=True)
 def targets(panel):
-    # Changes h complete rows ahead within a meeting; `target_date` lets the validation drop overlapping rows.
-    data = panel[panel.complete].sort_values(["event_ticker", "date"]).reset_index(drop=True)
+    # Changes h usable rows ahead within a meeting; `target_date` lets the validation drop overlapping rows.
+    data = panel[panel.usable].sort_values(["event_ticker", "date"]).reset_index(drop=True)
     _g = data.groupby("event_ticker")
     for _h in HORIZONS:
         data[f"d_kalshi_{_h}"] = (_g.x_kalshi.shift(-_h) - data.x_kalshi) * STEP_BP
@@ -424,6 +468,47 @@ def convergence(data):
     closing = pd.DataFrame(_rows).round(3)
     mo.ui.table(closing, selection=None)
     return (closing,)
+
+
+@app.cell(hide_code=True)
+def robustness_md():
+    mo.md(r"""
+    ## 3b · Robustness of statements 1 and 2
+
+    - **Gap instrumented by the gap 2 days earlier:** noise in either implied mean reverts and makes that market
+      look like the follower; the instrument keeps only the persistent part of the gap.
+    - **Empty books included:** the rows section 1 drops, to show how much they distort the result.
+    - **Open-ended buckets further out:** cut >25 and hike >25 scored at ±62.5bp instead of ±50bp (and hike >50
+      at 87.5bp). This matters only in meetings where a large move was live, such as September 2024.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def robustness(data, panel):
+    _dev = data[SCORE_HOLDOUT | ~data.holdout]
+    _all = panel[panel.complete & (SCORE_HOLDOUT | ~panel.holdout)]  # empty books back in
+    _variants = {
+        "baseline (usable rows)": (_dev, "x_kalshi", "gap_bp", False),
+        "gap instrumented by gap 2 days earlier": (_dev, "x_kalshi", "gap_bp", True),
+        "open-ended buckets at ±62.5bp": (_dev, "x_kalshi_alt", "gap_alt_bp", False),
+        "empty books included": (_all, "x_kalshi", "gap_bp", False),
+    }
+    _rows = []
+    for _name, (_d, _k, _gap, _iv) in _variants.items():
+        _m = cluster_bootstrap(_d, lambda df, g=_gap: df[g].mean())
+        _row = {"variant": _name, "rows": len(_d), "mean gap (bp)": round(_d[_gap].mean(), 2),
+                "95% CI": f"[{np.percentile(_m, 2.5):.2f}, {np.percentile(_m, 97.5):.2f}]"}
+        for _h in HORIZONS:
+            _est, _lo, _hi, _, _ = closing_stats(_d, _h, kalshi=_k, gap=_gap, iv=_iv)
+            _row[f"b Kalshi {_h}d"] = f"{_est[0]:.2f} [{_lo[0]:.2f}, {_hi[0]:.2f}]"
+            _row[f"d futures {_h}d"] = f"{_est[1]:.2f} [{_lo[1]:.2f}, {_hi[1]:.2f}]"
+        _rows.append(_row)
+    robust = pd.DataFrame(_rows)
+    mo.vstack([mo.ui.table(robust, selection=None),
+               mo.md("b > 0: Kalshi moves toward futures. d < 0: futures move toward Kalshi. Kalshi's share "
+                     "b / (b − d) is left out here because it is meaningless when b < 0.")])
+    return (robust,)
 
 
 @app.cell(hide_code=True)
@@ -592,6 +677,11 @@ def models_md():
 
     **Scores:** out-of-sample $R^2$ relative to no change and relative to AR(1), the share of days on which the
     direction is right, and a Clark–West test of ridge against AR(1). CIs resample whole test meetings.
+
+    **What the holdout run reports** (written 2026-10-22, before scoring it): at both horizons, the mean gap with
+    its CI; Kalshi's share of the closing with its CI (section 3); ridge's $R^2$ vs AR(1) with its CI and the
+    Clark–West p-value (section 5); the loss from dropping macro with its CI and p-value (section 6); and the
+    weekend test's slopes (section 8). Nothing else is used to judge the holdout.
     """)
     return
 
@@ -790,32 +880,128 @@ def coef_plot(ALL, FEATURES, alphas, feat):
 
 
 @app.cell(hide_code=True)
-def verdicts(closing, gap_summary, group_tests, main_scores):
+def weekend_md():
+    mo.md(r"""
+    ## 8 · Statement 5: does Kalshi lead when futures are closed?
+
+    Kalshi trades all weekend; fed funds futures stop Friday afternoon and reopen Sunday at 18:00 ET. For each
+    standard weekend (Friday and Monday both futures trading days) and each meeting with usable quotes at all three
+    times:
+
+    - $\Delta x^{FF}$: futures-implied move, Friday settle → Monday settle (bp).
+    - $\Delta x^{K}_\text{wknd}$: Kalshi expected move, Friday 15:00 ET → Sunday 17:00 ET, before futures reopen.
+    - $\Delta x^{K}_\text{rest}$: Kalshi, Sunday 17:00 → Monday 15:00, after futures reopen.
+
+    **Lead share:** the slope of $\Delta x^{K}_\text{wknd}$ on $\Delta x^{FF}$, controlling for Friday's gap: the share
+    of the futures' weekend repricing that Kalshi had already made before futures could trade. 0 means Kalshi waited
+    for futures; 1 means Kalshi priced it all on its own. **Prediction:** the reverse slope, $\Delta x^{FF}$ on
+    $\Delta x^{K}_\text{wknd}$: does Kalshi's weekend move forecast where futures open? CIs resample weekends (all
+    meetings in one weekend share its news). Most weekends carry no news, so the test is repeated on weekends where
+    futures moved at least `NEWS_WEEKEND_BP`.
+
+    Caveat: $\Delta x^{FF}$ also contains Monday's own news up to the settle, which Kalshi could not have seen on
+    Sunday, so the lead share is a lower bound on what Kalshi priced of the weekend's news.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def weekend(con, contracts, panel, queries):
+    _p = panel[panel.usable & (SCORE_HOLDOUT | ~panel.holdout)]
+    _days = pd.Series(sorted(panel.date.unique()))
+    _wk = pd.DataFrame({"fri": _days[:-1].to_numpy(), "mon": _days[1:].to_numpy()})
+    _wk = _wk[(_wk.fri.dt.dayofweek == 4) & ((_wk.mon - _wk.fri).dt.days == 3)]
+    _wk["sun"] = _wk.mon - pd.Timedelta(days=1)
+
+    # Kalshi at Sunday 17:00 ET for every contract of every meeting quoted that Friday.
+    _fri = _p[_p.date.isin(_wk.fri)][["event_ticker", "date", "x_ff", "x_kalshi", "gap_bp"]].rename(
+        columns={"date": "fri", "x_ff": "ff_fri", "x_kalshi": "k_fri", "gap_bp": "gap_fri"}).merge(_wk, on="fri")
+    _grid = contracts[["ticker", "event_ticker", "move_bps"]].merge(_fri[["event_ticker", "sun"]], on="event_ticker")
+    con.register("snapshot_grid", _grid[["ticker", "sun"]].drop_duplicates().rename(columns={"sun": "date"})
+                 .assign(date=lambda d: d.date.dt.date))
+    _sn = con.execute(queries["snapshots"], {"snapshot_hour": FUTURES_REOPEN_HOUR_ET - 1}).df()
+    _sn["date"] = pd.to_datetime(_sn.date)
+    _sun = (_grid.merge(_sn, left_on=["ticker", "sun"], right_on=["ticker", "date"], how="left")
+            .assign(w=lambda d: d.kalshi_p * d.move_bps)
+            .groupby(["event_ticker", "sun"], as_index=False)
+            .agg(n=("kalshi_p", "count"), n_all=("ticker", "size"), w=("w", "sum"), p=("kalshi_p", "sum"),
+                 spread=("spread", "max")))
+    _sun = _sun[(_sun.n == _sun.n_all) & (_sun.spread <= WIDE_SPREAD)].assign(k_sun=lambda d: d.w / d.p / STEP_BP)[["event_ticker", "sun", "k_sun"]]
+
+    _mon = _p[["event_ticker", "date", "x_ff", "x_kalshi"]].rename(
+        columns={"date": "mon", "x_ff": "ff_mon", "x_kalshi": "k_mon"})
+    weekends = _fri.merge(_sun, on=["event_ticker", "sun"]).merge(_mon, on=["event_ticker", "mon"])
+    weekends["d_ff"] = (weekends.ff_mon - weekends.ff_fri) * STEP_BP
+    weekends["d_k_wknd"] = (weekends.k_sun - weekends.k_fri) * STEP_BP
+    weekends["d_k_rest"] = (weekends.k_mon - weekends.k_sun) * STEP_BP
+    weekends["weekend"] = weekends.fri.dt.strftime("%Y-%m-%d")
+
+    def _fit(df, y, x, controls):
+        return ols(df[y].to_numpy(), df[[x, *controls]].to_numpy())[1]
+
+    _rows = []
+    for _sample, _d in [("all weekends", weekends),
+                        (f"news weekends (|Δ futures| ≥ {NEWS_WEEKEND_BP:g}bp)", weekends[weekends.d_ff.abs() >= NEWS_WEEKEND_BP])]:
+        if _d.weekend.nunique() < 5:
+            continue
+        for _name, _y, _x in [("Kalshi's weekend move on the futures move", "d_k_wknd", "d_ff"),
+                              ("Futures move on Kalshi's weekend move", "d_ff", "d_k_wknd")]:
+            _est = _fit(_d, _y, _x, ["gap_fri"])
+            _lo, _hi = np.percentile(cluster_bootstrap(_d, lambda df, y=_y, x=_x: _fit(df, y, x, ["gap_fri"]),
+                                                       cluster="weekend"), [2.5, 97.5])
+            _rows.append({"sample": _sample, "estimate": _name, "value": round(_est, 3), "95% CI low": round(_lo, 3),
+                          "95% CI high": round(_hi, 3), "rows": len(_d), "weekends": _d.weekend.nunique(),
+                          "corr": round(_d[[_y, _x]].corr().iloc[0, 1], 3)})
+    weekend_table = pd.DataFrame(_rows)
+
+    _chart = alt.Chart(weekends).mark_circle(size=40, opacity=0.5).encode(
+        x=alt.X("d_ff:Q", title="Futures move, Friday → Monday settle (bp)"),
+        y=alt.Y("d_k_wknd:Q", title="Kalshi move, Friday 15:00 → Sunday 17:00 (bp)"),
+        tooltip=["event_ticker", "weekend", alt.Tooltip("d_ff:Q", format=".2f"),
+                 alt.Tooltip("d_k_wknd:Q", format=".2f")]).properties(width="container", height=300)
+    mo.vstack([mo.ui.table(weekend_table, selection=None), _chart,
+               mo.md(f"Kalshi's own moves: weekend sd **{weekends.d_k_wknd.std():.2f}bp**, Sunday-to-Monday sd "
+                     f"**{weekends.d_k_rest.std():.2f}bp**.")])
+    return (weekend_table,)
+
+
+@app.cell(hide_code=True)
+def verdicts(closing, gap_summary, group_tests, main_scores, weekend_table):
     def _row(df, **kw):
         m = np.logical_and.reduce([df[k] == v for k, v in kw.items()])
         return df[m].iloc[0] if m.any() else None
 
-    _h = HORIZONS[-1]
-    _share = _row(closing, **{"h (days)": _h, "estimate": "Kalshi share of closing"})
-    _ridge = _row(main_scores, h=_h, model="Ridge: all")
-    _macro = _row(group_tests, h=_h, **{"group dropped": "macro"})
     _ci = gap_summary["ci"]
     _lines = [
         f"1. **Gap persistent and signed?** Mean {gap_summary['mean']:.2f}bp (CI {_ci[0]:.2f} to {_ci[1]:.2f}), "
         f"positive on {gap_summary['share_pos']:.0%} of days, lag-1 autocorrelation {gap_summary['autocorr']:.2f}. "
         f"Signed if the CI excludes 0.",
     ]
-    if _share is not None:
-        _lines.append(f"2. **Kalshi closes the gap?** Kalshi's share of closing over {_h} days: "
-                      f"{_share['value']:.2f} (CI {_share['95% CI low']:.2f} to {_share['95% CI high']:.2f}). "
-                      "Supported if the CI lies above 0.5.")
-    if _macro is not None:
-        _lines.append(f"3. **Macro adds beyond the rest?** Loss from dropping macro at h = {_h}: "
-                      f"{_macro['loss from dropping']} {_macro['95% CI']}, Clark–West p = {_macro['p']}.")
-    if _ridge is not None:
-        _lines.append(f"4. **Predictable out of sample?** Ridge R² vs AR1 at h = {_h}: {_ridge['R² vs AR1']} "
-                      f"{_ridge['95% CI ']}, Clark–West p {_ridge['Clark–West p vs']}.")
-    mo.md("## 7 · Verdicts (" + ("final test" if SCORE_HOLDOUT else "development meetings only") + ")\n\n"
+    _l2, _l3, _l4 = [], [], []
+    for _h in HORIZONS:
+        _b = _row(closing, **{"h (days)": _h, "estimate": "b: Kalshi on gap"})
+        _d = _row(closing, **{"h (days)": _h, "estimate": "d: futures on gap"})
+        if _b is not None and _d is not None:
+            _l2.append(f"{_h}d: Kalshi b = {_b['value']:.2f} [{_b['95% CI low']:.2f}, {_b['95% CI high']:.2f}], "
+                       f"futures d = {_d['value']:.2f} [{_d['95% CI low']:.2f}, {_d['95% CI high']:.2f}]")
+        _macro = _row(group_tests, h=_h, **{"group dropped": "macro"})
+        if _macro is not None:
+            _l3.append(f"{_h}d: {_macro['loss from dropping']} {_macro['95% CI']}, Clark–West p = {_macro['p']}")
+        _ridge = _row(main_scores, h=_h, model="Ridge: all")
+        if _ridge is not None:
+            _l4.append(f"{_h}d: {_ridge['R² vs AR1']} {_ridge['95% CI ']}, Clark–West p {_ridge['Clark–West p vs'].split()[0]}")
+    _lines += [
+        "2. **Who closes the gap?** " + "; ".join(_l2) + ". Kalshi follows where b > 0; futures move toward "
+        "Kalshi where d < 0. Section 3b has the noise-robust (instrumented) version.",
+        "3. **Macro adds beyond the rest?** Loss from dropping macro: " + "; ".join(_l3) + ". Supported where the CI lies above 0.",
+        "4. **Predictable beyond mean reversion?** Ridge R² vs AR1: " + "; ".join(_l4) + ". Supported where the CI lies above 0.",
+    ]
+    _wk = _row(weekend_table, sample="all weekends", estimate="Kalshi's weekend move on the futures move")
+    if _wk is not None:
+        _lines.append(f"5. **Kalshi leads when futures are closed?** Share of the futures' Friday-to-Monday repricing "
+                      f"Kalshi made before futures reopened: {_wk['value']:.2f} (CI {_wk['95% CI low']:.2f} to "
+                      f"{_wk['95% CI high']:.2f}). Supported where the CI lies above 0.")
+    mo.md("## 9 · Verdicts (" + ("final test" if SCORE_HOLDOUT else "development meetings only") + ")\n\n"
           + "\n".join(_lines)
           + "\n\nA statement that fails is still a result: write it up with the number that decides it.")
     return
